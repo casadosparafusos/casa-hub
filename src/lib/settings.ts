@@ -1,0 +1,161 @@
+import 'server-only'
+import { eq } from 'drizzle-orm'
+import { db, schema } from './db'
+import { decryptSecret, encryptSecret } from './crypto/secret-box'
+import { SECRET_KEYS, type SecretKey } from './settings-shared'
+
+export { SECRET_KEYS }
+export type { SecretKey }
+
+// -----------------------------------------------------------------------
+// Configuracao da integracao ERP -> Wake. Duas camadas:
+//   1) valores fixos de regra de negocio, ja definidos pela especificacao
+//      (podem ser sobrescritos por env var, mas tem default do proprio
+//      spec);
+//   2) valores especificos de conta Wake/CISS que a especificacao PROIBE
+//      inventar -- ficam null ate serem descobertos e gravados na tabela
+//      `settings` (via tela de Configuracoes) ou setados por env var no
+//      systemd. O motor de sync deve recusar rodar contra o Wake real
+//      (fora de dry-run) enquanto qualquer um destes REQUIRED_UNCONFIRMED
+//      estiver ausente.
+// -----------------------------------------------------------------------
+
+export const REQUIRED_UNCONFIRMED_KEYS = [
+  'WAKE_CD_ID',
+  'WAKE_STOCK_CONTROL_MODE', // 'fstore' | 'erp' -- ver docs/WAKE-API-CONTRATOS.md
+  'WAKE_PRICE_TABLE_ID',
+  'WAKE_PROMOTION_ID',
+  'CSV_IDENTIFIER_TYPE', // 'sku' | 'id interno' -- tipoIdentificador da API Wake
+] as const
+
+export type RequiredUnconfirmedKey = (typeof REQUIRED_UNCONFIRMED_KEYS)[number]
+
+export const RULE_DEFAULTS = {
+  UNIT_PRICE_MARKUP_PERCENT: 20,
+  WHOLESALE_MIN_QTY: 100,
+  STOCK_PERCENT: 10,
+  RECONCILIATION_HOUR_LOCAL: 3, // 03:00, ver worker/index.ts
+  // Intervalos do sync agendado (worker/index.ts) -- independentes: estoque
+  // muda o dia todo (giro de venda), preco e mais estavel (custo do ERP).
+  // Pedido explicito do usuario em 08/09/2026: estoque de 1 em 1 minuto,
+  // preco de 24 em 24h.
+  STOCK_SYNC_INTERVAL_MINUTES: 1,
+  PRICE_SYNC_INTERVAL_HOURS: 24,
+} as const
+
+// CISS_STOCK_ENTERPRISE/CISS_STOCK_LOCATION NAO estao em REQUIRED_UNCONFIRMED
+// porque ja temos valor real, confirmado por sondagem direta da API CISS em
+// 25/08/2026 e validado em producao pelo sync da Reposicao (empresa=2,
+// local=5 = "ESTOQUE CD", o mesmo CD que abastece o e-commerce) -- nao e
+// valor inventado, ver docs/ciss-required-endpoints.md e memoria
+// reposicao-sync-real-ativado-server-30. Continuam sobrescritiveis (env var
+// ou tela de Configuracoes) caso o SIGAS confirme outro local no futuro.
+export const STOCK_SOURCE_DEFAULTS = {
+  CISS_STOCK_ENTERPRISE: 2,
+  CISS_STOCK_LOCATION: 5,
+} as const
+
+function envOverride(key: string): string | undefined {
+  const v = process.env[key]
+  return v && v.trim() !== '' ? v.trim() : undefined
+}
+
+export async function getSetting(key: string): Promise<string | null> {
+  const envValue = envOverride(key)
+  if (envValue !== undefined) return envValue
+  const row = await db.select().from(schema.settings).where(eq(schema.settings.key, key)).get()
+  return row?.value ?? null
+}
+
+export async function setSetting(key: string, value: string, updatedBy?: string): Promise<void> {
+  await db
+    .insert(schema.settings)
+    .values({ key, value, updatedBy, updatedAt: new Date().toISOString() })
+    .onConflictDoUpdate({
+      target: schema.settings.key,
+      set: { value, updatedBy, updatedAt: new Date().toISOString() },
+    })
+}
+
+// -----------------------------------------------------------------------
+// Segredos (tokens de API Wake/CISS) -- gravados criptografados
+// (AES-256-GCM, ver src/lib/crypto/secret-box.ts) na mesma tabela
+// `settings`, nunca em texto plano no banco nem devolvidos ao cliente (a
+// rota /api/settings so expoe um booleano "configurado"). Diferente de
+// getSetting/setSetting: aqui o valor gravado no banco tem PRIORIDADE sobre
+// a env var (o objetivo desta tela e permitir rotacionar o token sem SSH),
+// mas a env var continua funcionando como fallback caso nada tenha sido
+// salvo ainda pela UI -- zero downtime na migracao.
+// -----------------------------------------------------------------------
+
+async function getSecretRow(key: SecretKey): Promise<string | null> {
+  const row = await db.select().from(schema.settings).where(eq(schema.settings.key, key)).get()
+  return row?.value ?? null
+}
+
+export async function setSecret(key: SecretKey, value: string, updatedBy?: string): Promise<void> {
+  const encrypted = encryptSecret(value)
+  await db
+    .insert(schema.settings)
+    .values({ key, value: encrypted, updatedBy, updatedAt: new Date().toISOString() })
+    .onConflictDoUpdate({
+      target: schema.settings.key,
+      set: { value: encrypted, updatedBy, updatedAt: new Date().toISOString() },
+    })
+}
+
+export async function getSecret(key: SecretKey): Promise<string | null> {
+  const stored = await getSecretRow(key)
+  if (stored) return decryptSecret(stored)
+  return envOverride(key) ?? null
+}
+
+/** Pra UI: diz se o segredo esta configurado, sem nunca devolver o valor. */
+export async function isSecretConfigured(key: SecretKey): Promise<boolean> {
+  const stored = await getSecretRow(key)
+  if (stored) return true
+  return envOverride(key) !== undefined
+}
+
+/** Le todos os valores obrigatorios-nao-confirmados e diz quais faltam. */
+export async function checkRequiredUnconfirmed(): Promise<{
+  values: Record<RequiredUnconfirmedKey, string | null>
+  missing: RequiredUnconfirmedKey[]
+}> {
+  const values = {} as Record<RequiredUnconfirmedKey, string | null>
+  const missing: RequiredUnconfirmedKey[] = []
+  for (const key of REQUIRED_UNCONFIRMED_KEYS) {
+    const v = await getSetting(key)
+    values[key] = v
+    if (v === null) missing.push(key)
+  }
+  return { values, missing }
+}
+
+async function getNumberRule(key: keyof typeof RULE_DEFAULTS): Promise<number> {
+  const raw = await getSetting(key)
+  if (raw === null) return RULE_DEFAULTS[key]
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : RULE_DEFAULTS[key]
+}
+
+async function getStockSourceValue(key: keyof typeof STOCK_SOURCE_DEFAULTS): Promise<number> {
+  const raw = await getSetting(key)
+  if (raw === null) return STOCK_SOURCE_DEFAULTS[key]
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : STOCK_SOURCE_DEFAULTS[key]
+}
+
+export const rules = {
+  unitPriceMarkupPercent: () => getNumberRule('UNIT_PRICE_MARKUP_PERCENT'),
+  wholesaleMinQty: () => getNumberRule('WHOLESALE_MIN_QTY'),
+  stockPercent: () => getNumberRule('STOCK_PERCENT'),
+  reconciliationHourLocal: () => getNumberRule('RECONCILIATION_HOUR_LOCAL'),
+  stockSyncIntervalMinutes: () => getNumberRule('STOCK_SYNC_INTERVAL_MINUTES'),
+  priceSyncIntervalHours: () => getNumberRule('PRICE_SYNC_INTERVAL_HOURS'),
+}
+
+export const stockSource = {
+  enterprise: () => getStockSourceValue('CISS_STOCK_ENTERPRISE'),
+  location: () => getStockSourceValue('CISS_STOCK_LOCATION'),
+}

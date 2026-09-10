@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Tokens de marca Casa dos Parafusos -- identicos aos usados pela
+ * Reposicao/RD Gerencial/Auditoria. NAO diverge daqui sem atualizar os
+ * outros apps do ecossistema (ver src/components/topbar.tsx e
+ * tailwind.config.ts pro resto do contrato visual).
+ */
+:root {
+  --fundo: #e1e1e1;
+  --superficie: #ffffff;
+  --superficie-sunken: #f4f4f3;
+  --superficie-hover: #f7f7f6;
+  --borda: #d4d4d8;
+  --borda-forte: #b9b9bd;
+  --texto: #323737;
+  --texto-suave: #6b7280;
+  --marca: #1e28a5;
+  --marca-escura: #0f1e7d;
+  --marca-acento: #0fb9ff;
+  --marca-lavada: #eef1fc;
+  --shell-max: 1440px;
+  --shell-pad: 24px;
+
+  /* Escala de espaço/raio/sombra -- mesmos valores do RD Gerencial
+     (frontend/src/index.css), a referência visual pedida pro redesign
+     do Casa Hub. Não diverge daqui sem atualizar a origem também. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --shadow-sm: 0 1px 2px rgba(15, 30, 125, 0.06);
+  --shadow: 0 4px 16px rgba(15, 30, 125, 0.08);
+  --shadow-lg: 0 12px 32px rgba(15, 30, 125, 0.14);
+}
+
+@media (min-width: 1280px) {
+  :root {
+    --shell-pad: 32px;
+  }
+}
+
+html,
+body {
+  background: var(--fundo);
+  color: var(--texto);
+}
+
+.shell {
+  max-width: var(--shell-max);
+  margin: 0 auto;
+  padding-left: var(--shell-pad);
+  padding-right: var(--shell-pad);
+}
+
+/* --- cartão/seção padrão ---------------------------------------------------
+   Substitui o `rounded-lg border ... bg-[var(--superficie)]` repetido em toda
+   página: mesmo raio maior e uma sombra suave dão profundidade que o app não
+   tinha, sem sair da paleta. */
+.section {
+  background: var(--superficie);
+  border: 1px solid var(--borda);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.section--pad {
+  padding: var(--space-4);
+}
+
+/* --- tabelas ----------------------------------------------------------------
+   Cabeçalho em versalete/rastreado (como o RD Gerencial) em vez de texto solto,
+   e a linha ganha hover -- sinaliza que a tabela é densa e navegável. */
+.data-table thead th {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--texto-suave);
+  border-bottom: 1px solid var(--borda-forte);
+  white-space: nowrap;
+}
+
+.data-table tbody tr:hover {
+  background: var(--superficie-hover);
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}

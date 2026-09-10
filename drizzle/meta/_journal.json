@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1788446419780,
+      "tag": "0000_sour_grandmaster",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788468607440,
+      "tag": "0001_clever_plazm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788900176213,
+      "tag": "0002_striped_miek",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+[Unit]
+Description=Casa Hub (ERP -> Wake) -- servico web (Next.js, porta 8083)
+After=network.target
+
+[Service]
+Type=simple
+User=erpwake
+Group=erpwake
+WorkingDirectory=/opt/erp-wake
+EnvironmentFile=/opt/erp-wake/.env
+# Node 22 isolado so do Casa Hub -- o Node 18 do sistema (usado por outras
+# aplicacoes deste servidor) nao e tocado.
+Environment=PATH=/opt/erp-wake/.runtime/node/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+# Escuta direto na 8083 -- sem passar pelo nginx deste servidor (que atende
+# a API do SIGAS/ERP e nao deve ser recarregado por causa do Casa Hub).
+ExecStart=/opt/erp-wake/.runtime/node/bin/node /opt/erp-wake/node_modules/next/dist/bin/next start -H 0.0.0.0 -p 8083
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=1G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
