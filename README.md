@@ -9,8 +9,8 @@ Casa HUB é a aplicação interna da Casa dos Parafusos responsável por sincron
 - Baseline: `053434ce0209c406add5020fe1c2d259d138e165`
 - Data da auditoria: 10/09/2026
 - Stack observada: Next.js 15 + React 19 + worker Node/tsx + SQLite/Drizzle
-- Escopo de produção atual: fixadores em `UNIT=CENTO`
-- Estado: produção operacional, ainda não certificada por reconciliação completa CISS → Wake real.
+- Escopo de produção atual: fixadores em `UNIT=CT` (apelido de negócio "CENTO")
+- Estado: produção operacional; reconciliação READ-ONLY completa executada 1× em 11/09/2026 (ver `docs/PRODUCTION_RECONCILIATION.md`); mapa de UNITs OWNER_CONFIRMED no mesmo dia (`docs/CISS_UNIT_MAP.md`), engine ainda não atualizado.
 
 ## Ordem obrigatória de leitura para qualquer agente
 
@@ -25,7 +25,9 @@ Casa HUB é a aplicação interna da Casa dos Parafusos responsável por sincron
 9. `DOCS/REPO_WORKFLOW.md`
 10. `DOCS/VALIDATION_PROTOCOL.md`
 11. `DOCS/PRODUCTION_RECONCILIATION.md`
-12. Git real: branch, HEAD, `origin/main`, diff e PR atual.
+12. `DOCS/RECONCILIATION_READONLY.md`
+13. `DOCS/CISS_UNIT_MAP.md`
+14. Git real: branch, HEAD, `origin/main`, diff e PR atual.
 
 Conversas antigas e comentários históricos nunca prevalecem sobre Git + documentos canônicos acima.
 
@@ -61,11 +63,11 @@ Estoque deve ser reconciliável contra o estoque real do CD na Wake.
 
 ## UNIT é fonte de verdade
 
-A unidade de medida do CISS deve governar a regra:
+A unidade de medida do CISS deve governar a regra. Mapa canônico OWNER_CONFIRMED em 11/09/2026 (censo completo em `docs/CISS_UNIT_MAP.md`):
 
-- `CENTO` → fixadores;
-- `PC` / `UN` → peça;
-- `KG` → produto vendido em caixa/pacote configurado;
-- qualquer outra unidade → fail closed até configuração explícita.
+- `CT` → HUNDRED (fixadores);
+- `PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL` → DIRECT (1:1, sem fator);
+- `KG`, `MT` → PACKAGE_MEASURED (precisa `quantity_per_sale_unit` por SKU; sem config → `CONFIGURATION_REQUIRED`);
+- qualquer outra unidade → `UNSUPPORTED_UNIT`, fail closed até configuração explícita.
 
 Nunca inferir unidade pelo nome do produto.

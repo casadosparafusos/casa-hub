@@ -20,36 +20,40 @@ CISS Adapter
 Fonte única:
 `CISS stock.unit`
 
-Estratégias:
-- `HundredStrategy`
-- `PieceStrategy`
-- `KgPackageStrategy`
-- `UnsupportedStrategy`
+Mapa canônico OWNER_CONFIRMED em 11/09/2026 (`CISS_UNIT_MAP.md`):
+
+```text
+CT                                     -> HundredUnitStrategy
+PC UN JG PR CJ RL KT CX LT PL          -> DirectUnitStrategy
+KG                                     -> MeasuredPackageUnitStrategy(KG)
+MT                                     -> MeasuredPackageUnitStrategy(MT)
+qualquer UNIT futura fora do mapa      -> UnsupportedUnitStrategy (fail closed)
+```
+
+Nomeação deliberada: **não** existe `PieceStrategy` — o grupo `DIRECT` inclui JG/PR/CJ/RL/CX, que não são semanticamente "peça"; por isso `DirectUnitStrategy`. Uma UNIT nova e desconhecida nunca vira `DirectUnitStrategy` por padrão — cai em `UnsupportedUnitStrategy`.
 
 ## Separação de preço
 
-`UnitNormalizer`:
-- CENTO: CISS/100
-- PC/UN: CISS
-- KG: CISS/kg × kgPorCaixa
+`UnitNormalizer` (normalização matemática, por UNIT):
+- `CT` (HUNDRED): `ciss_price / 100`
+- `PC UN JG PR CJ RL KT CX LT PL` (DIRECT): `ciss_price`
+- `KG` / `MT` (PACKAGE_MEASURED): `ciss_price_por_unidade_origem * quantity_per_sale_unit`
 
-`CommercialPolicy`:
-- FIXADOR_CENTO:
-  - varejo +20%;
-  - >=100 desconto 20% sobre varejo.
-- PC/UN: inicialmente sem regra extra.
-- KG: inicialmente sem regra extra.
+`CommercialPolicy` (separada da normalização — nunca no adapter CISS):
+- `FIXADOR_CENTO` (só para produtos `CT`): varejo +20%; >=100 unidades: desconto 20% sobre varejo; exposição de estoque 10%.
+- `DIRECT`: sem regra extra por padrão.
+- `PACKAGE_MEASURED`: sem regra extra por padrão.
 
 ## Estoque
 
-CENTO:
+`CT` (HUNDRED), normalização + política FIXADOR_CENTO:
 `floor(raw*100*0.10)`
 
-PC:
-`floor(raw)`
+`PC UN JG PR CJ RL KT CX LT PL` (DIRECT):
+`floor(max(raw,0))`
 
-KG:
-`floor(raw/kgPorCaixa)`
+`KG` / `MT` (PACKAGE_MEASURED):
+`floor(max(raw,0)/quantity_per_sale_unit)`
 
 ## Reconciliation
 
@@ -63,7 +67,7 @@ Separar:
 - `managed_products`;
 - estado atual por produto;
 - UNIT observada;
-- packaging KG;
+- `product_sale_unit_config` (genérica para KG e MT — não uma tabela por UNIT — campos: `managed_product_id, wake_sku, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by`; ainda não criada, ver `ROADMAP.md` FASE 7);
 - scheduler/heartbeat;
 - runs relevantes;
 - itens alterados/falhos/divergentes;

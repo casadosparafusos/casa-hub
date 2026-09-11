@@ -14,20 +14,23 @@ Isso NÃO desativa o produto dentro da Wake.
 Fonte de verdade:
 campo `unit` devolvido pelo CISS/POWER no endpoint de estoque.
 
-Mapeamento inicial:
+**Mapa canônico, OWNER_CONFIRMED em 11/09/2026** (censo global de 22323 produtos, 13 siglas reais; detalhes e evidências em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md)):
 
-- `CENTO` → fixadores;
-- `PC` e `UN` → produtos normais;
-- `KG` → produto controlado em kg e vendido em embalagem configurada.
+```text
+CT                                          -> HUNDRED
+PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL      -> DIRECT
+KG                                          -> PACKAGE_MEASURED(KG)
+MT                                          -> PACKAGE_MEASURED(MT)
+qualquer UNIT futura fora deste mapa        -> UNSUPPORTED_UNIT
+```
 
-Qualquer outra UNIT:
-`UNSUPPORTED_UNIT`
+`CT` é a sigla real gravada pelo CISS; "CENTO" é só o apelido usado internamente para a estratégia `HUNDRED`. Nunca inferir esse mapeamento por nome/descrição do produto — só o campo `unit`.
 
-Comportamento:
+Comportamento para `UNSUPPORTED_UNIT`:
 - não calcular;
 - não escrever;
 - registrar pendência;
-- nunca assumir PC.
+- nunca assumir DIRECT nem HUNDRED por padrão (fail closed).
 
 ## 3. Separação obrigatória
 
@@ -41,27 +44,24 @@ A arquitetura deve separar:
 
 Não misturar isso em um único `if` gigante.
 
-## 4. Fixadores CENTO
+## 4. CT / HUNDRED (fixadores)
 
-Estoque CISS em CENTO:
-`unidades_fisicas = estoque_ciss * 100`
+Normalização (UNIT `CT`, OWNER_CONFIRMED):
 
-Somente fixadores expõem 10%:
-`estoque_wake = floor(unidades_fisicas * 0.10)`
-
-Preço CISS em CENTO:
+`physical_units = estoque_ciss * 100`
 `preco_base_unitario = preco_ciss_cento / 100`
 
-Política comercial atual:
-- varejo: +20%;
-- a partir de 100 unidades: desconto de 20% sobre o varejo.
+Política comercial **FIXADOR_CENTO** é separada da normalização acima — não entra no adapter CISS, fica em `CommercialPolicy`:
+- exposição de estoque: `estoque_wake = floor(physical_units * 0.10)`;
+- varejo: `preco_varejo = preco_base_unitario * 1.20`;
+- a partir de 100 unidades: `preco_atacado = preco_varejo * 0.80`.
 
 Detalhes em `PRICE_RULES.md`.
 
-## 5. PC / UN
+## 5. DIRECT — PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL
 
 Estoque:
-`estoque_wake = floor(estoque_ciss)`
+`estoque_wake = floor(max(estoque_ciss, 0))`
 
 Preço:
 `preco_base = preco_ciss`
@@ -71,31 +71,34 @@ Não aplicar:
 - ÷100;
 - 10% de estoque;
 - markup dos fixadores;
-- promoção de fixadores.
+- promoção de fixadores;
+- limiar de atacado >=100.
 
-Qualquer margem futura de PC/UN deve ser política configurável própria.
+A UNIT do CISS sempre prevalece sobre a descrição do produto — mesmo um texto como "50 peças" não muda a regra de uma UNIT `DIRECT`.
 
-## 6. KG
+Qualquer margem futura de um destes grupos deve ser política configurável própria, nunca herdada automaticamente do fixador.
+
+## 6. KG e MT — PACKAGE_MEASURED
 
 CISS:
-- estoque em kg;
-- preço de 1 kg.
+- `KG`: estoque em kg, preço de 1 kg;
+- `MT`: estoque em metros, preço de 1 metro.
 
-Cadastro obrigatório no Casa HUB:
-`kg_por_caixa`
+Cadastro obrigatório por SKU (tabela `product_sale_unit_config`, ver `ARCHITECTURE_TARGET.md`):
+`quantity_per_sale_unit` (rótulo de UI `QT KG` ou `QT MT`, conforme a UNIT).
 
 Estoque:
-`caixas_wake = floor(estoque_ciss_kg / kg_por_caixa)`
+`unidades_venda_wake = floor(max(estoque_ciss_na_unit_de_origem, 0) / quantity_per_sale_unit)`
 
 Preço:
-`preco_caixa = preco_ciss_por_kg * kg_por_caixa`
+`preco_unidade_venda = preco_ciss_por_unidade_de_origem * quantity_per_sale_unit`
 
-Exemplo:
+Exemplo (KG):
 - estoque CISS = 340 kg
-- caixa = 18 kg
-- Wake = `floor(340/18) = 18 caixas`
+- `QT KG` = 18
+- Wake = `floor(340/18) = 18 unidades de venda`, sobra 16 kg (exibida, não vendável)
 
-Sem `kg_por_caixa`:
+Sem `quantity_per_sale_unit` configurado e válido (`> 0`):
 `CONFIGURATION_REQUIRED`
 
 Não escrever preço nem estoque.

@@ -1,48 +1,51 @@
 # INVENTORY_RULES — Regras canônicas de estoque
 
-## CENTO — fixadores
+Mapa canônico OWNER_CONFIRMED em 11/09/2026 — ver `CISS_UNIT_MAP.md` e `BUSINESS_RULES.md §2`.
+
+## CT / HUNDRED — fixadores
 
 CISS:
-`UNIT=CENTO`
+`UNIT=CT`
 
-Conversão:
+Normalização:
 `physical_units = max(estoque_ciss, 0) * 100`
 
-Exposição atual:
+Exposição (política comercial FIXADOR_CENTO, separada da normalização):
 `wake_stock = floor(physical_units * 0.10)`
 
-O 10% é regra específica dos fixadores atuais.
+O 10% é regra específica da política comercial de fixadores, não da UNIT `CT` em si.
 
-## PC / UN
+## DIRECT — PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL
 
 `wake_stock = floor(max(estoque_ciss, 0))`
 
-1 PC = 1 PC.
+1 unidade CISS = 1 unidade Wake.
 
 Não usar ×100.
 Não usar 10%.
+Não usar nenhum fator de fixador.
 
-## KG vendido em caixa
+## KG e MT — PACKAGE_MEASURED
 
-Cadastro:
-`kg_por_caixa > 0`
+Cadastro por SKU (`product_sale_unit_config`):
+`quantity_per_sale_unit > 0` (UI: `QT KG` ou `QT MT`)
 
 CISS:
-estoque bruto em kg.
+estoque bruto na unidade de origem (kg ou metros).
 
 Wake:
-`wake_stock = floor(max(estoque_ciss_kg, 0) / kg_por_caixa)`
+`wake_stock = floor(max(estoque_ciss_na_unit_origem, 0) / quantity_per_sale_unit)`
 
-Exemplo:
-`340kg / 18kg = 18 caixas`, sobra 16 kg.
+Exemplo (KG):
+`340kg / 18kg = 18 unidades de venda`, sobra 16 kg.
 
-A sobra deve ser exibida para auditoria, mas não vira caixa vendável.
+A sobra deve ser exibida para auditoria, mas não vira unidade vendável.
 
 ## Fail closed
 
 Se:
-- UNIT desconhecida;
-- `kg_por_caixa` ausente;
+- UNIT desconhecida (fora do mapa canônico → `UNSUPPORTED_UNIT`);
+- `quantity_per_sale_unit` ausente ou inválido (KG/MT) → `CONFIGURATION_REQUIRED`;
 - número inválido;
 - resposta CISS inválida;
 
@@ -50,7 +53,7 @@ então:
 - não escrever Wake;
 - registrar motivo;
 - não inventar zero;
-- não usar fórmula CENTO como fallback.
+- não usar fórmula HUNDRED nem DIRECT como fallback.
 
 ## Tipo de dado
 

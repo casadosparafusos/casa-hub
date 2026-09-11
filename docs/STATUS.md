@@ -1,6 +1,6 @@
 # STATUS — Casa Hub
 
-Atualizado em 11/09/2026 (censo de UNITs + decisões OWNER_CONFIRMED).
+Atualizado em 11/09/2026 (consolidação do baseline canônico: FASE 0 + reconciliador + censo de UNITs + decisões OWNER_CONFIRMED, tudo numa única branch documental).
 
 ## Produção
 
@@ -11,9 +11,10 @@ Atualizado em 11/09/2026 (censo de UNITs + decisões OWNER_CONFIRMED).
 
 | Branch | Base | Estado |
 |---|---|---|
-| `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; a reconciliação ao vivo foi feita pelo reconciliador (linha abaixo). |
-| `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY. **Executado 1× em produção em 11/09/2026 (SHA `c7616d7`)**, só leitura, sem correções. Resultado em [PRODUCTION_RECONCILIATION.md](PRODUCTION_RECONCILIATION.md). Aguarda decisões (abaixo). |
-| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS **+ decisões de negócio OWNER_CONFIRMED em 11/09/2026.** Resultado em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md). Ainda **não implementado** (é doc + decisão; motor de produção não foi tocado). |
+| `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; a reconciliação ao vivo foi feita pelo reconciliador (linha abaixo). Consolidada abaixo. |
+| `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY. **Executado 1× em produção em 11/09/2026 (SHA `c7616d7`)**, só leitura, sem correções. Resultado em [PRODUCTION_RECONCILIATION.md](PRODUCTION_RECONCILIATION.md). Consolidada abaixo. |
+| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS **+ decisões de negócio OWNER_CONFIRMED em 11/09/2026.** Resultado em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md). Consolidada abaixo. |
+| `docs/canonical-baseline-unit-map` | **origin/main (053434c)** | **Branch atual.** Reúne numa única base documental coerente: docs canônicos da FASE 0 (`README.md`, `CLAUDE.md`, `BUSINESS_RULES.md`, `PRICE_RULES.md`, `INVENTORY_RULES.md`, `ARCHITECTURE_TARGET.md`, `ROADMAP.md`, `UI_UX_REQUIREMENTS.md`, etc., já atualizados com o mapa OWNER_CONFIRMED) + `STATUS.md`/`CISS_UNIT_MAP.md`/reconciliação/scripts READ-ONLY das branches acima. Candidata a PR (draft) para `main`. Ainda **não implementado** nenhum `UnitStrategy`; motor de produção intocado. |
 
 ## Censo de UNITs do CISS + mapa canônico OWNER_CONFIRMED — `audit/ciss-unit-census`
 
@@ -49,9 +50,9 @@ Atualizado em 11/09/2026 (censo de UNITs + decisões OWNER_CONFIRMED).
 - **Implementação adiada de propósito** para `feat/unit-strategies` (a criar a partir da `origin/main`, só depois de aprovação e merge desta fase de doc/auditoria). Nesta rodada não se mexeu em motor de preço, motor de estoque, sync, Wake client, banco, UI ou scheduler; não se escreveu na Wake; não se corrigiram os 16 PC nem o KG; nenhuma migration foi criada.
 - Relatório por produto só em `artifacts-private/ciss-unit-census-20260911.{json,csv}` (fora do Git).
 
-### Documentos canônicos citados pelo pedido — ausentes nesta branch
+### Consolidação do baseline canônico — `docs/canonical-baseline-unit-map`
 
-`docs/BUSINESS_RULES.md`, `docs/PRICE_RULES.md`, `docs/INVENTORY_RULES.md`, `docs/ARCHITECTURE_TARGET.md`, `docs/ROADMAP.md` e `docs/UI_UX_REQUIREMENTS.md` **não existem** na árvore de `audit/ciss-unit-census` (nem na `audit/reconciliacao-readonly`, sua base). Eles existem só em `audit/fase-0-runtime-readonly` (commit `62e54e7`, ainda sem merge na `main`). Por instrução explícita, não foram recriados aqui por memória — recriar geraria uma versão conflitante e não teríamos como reconciliar as duas depois. Quando `audit/fase-0-runtime-readonly` for integrada (ou revista), as decisões OWNER_CONFIRMED acima precisam ser propagadas para esses documentos.
+Os documentos citados no pedido de censo (`docs/BUSINESS_RULES.md`, `docs/PRICE_RULES.md`, `docs/INVENTORY_RULES.md`, `docs/ARCHITECTURE_TARGET.md`, `docs/ROADMAP.md`, `docs/UI_UX_REQUIREMENTS.md`) não existiam na árvore de `audit/ciss-unit-census`; existiam só em `audit/fase-0-runtime-readonly` (commit `62e54e7`). Nesta branch (`docs/canonical-baseline-unit-map`, criada diretamente de `origin/main`) eles foram trazidos de `audit/fase-0-runtime-readonly` e, num commit seguinte, atualizados para refletir o mapa OWNER_CONFIRMED (`CT→HUNDRED`, `PC/UN/JG/PR/CJ/RL/KT/CX/LT/PL→DIRECT`, `KG/MT→PACKAGE_MEASURED`, UNIT futura→`UNSUPPORTED_UNIT`). `README.md` e `CLAUDE.md` também vieram da FASE 0 e foram atualizados. `STATUS.md`, `CISS_UNIT_MAP.md`, `PRODUCTION_RECONCILIATION.md`, `RECONCILIATION_READONLY.md`, `.gitignore` e os scripts READ-ONLY vieram da versão mais recente em `audit/ciss-unit-census`, que prevalece sobre a de `audit/fase-0-runtime-readonly` onde houver sobreposição.
 
 ## Reconciliador READ-ONLY — `audit/reconciliacao-readonly`
 

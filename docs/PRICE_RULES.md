@@ -20,9 +20,11 @@ Pipeline:
 
 ---
 
-## 1. Fixadores — UNIT=CENTO
+## 1. Fixadores — UNIT=CT (HUNDRED)
 
-No CISS/POWER, o preço informado é o preço de 100 peças.
+No CISS/POWER, o preço informado é o preço de 100 peças. `CT` é a sigla real do campo `unit`; "CENTO"/"fixadores" são só os apelidos de negócio da estratégia `HUNDRED` (OWNER_CONFIRMED em 11/09/2026, mapa completo em `CISS_UNIT_MAP.md`).
+
+A normalização (`Pbase_unit`) é separada da política comercial abaixo — a política **FIXADOR_CENTO** vive em `CommercialPolicy`, nunca no adapter CISS.
 
 Se:
 
@@ -93,36 +95,38 @@ Registrar preço unitário e total efetivamente cobrados.
 
 ---
 
-## 2. PC / UN
+## 2. DIRECT — PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL
 
-O preço do CISS já representa uma peça.
+O preço do CISS já representa a unidade de venda (OWNER_CONFIRMED em 11/09/2026).
 
 `Pbase = Pciss`
 
-Não dividir por 100.
+Não dividir por 100, não multiplicar por 100.
 
-O markup atual de 20% foi definido para fixadores; não aplicar automaticamente em PC/UN.
+O markup de 20%/atacado >=100 é exclusivo da política FIXADOR_CENTO (UNIT `CT`); não aplicar automaticamente em nenhuma UNIT `DIRECT`. A UNIT do CISS sempre prevalece sobre a descrição do produto.
 
-Se o negócio quiser margem futura:
-criar `CommercialPolicy` própria e configurável.
+Se o negócio quiser margem futura para algum destes grupos:
+criar `CommercialPolicy` própria e configurável, nunca reaproveitar a de fixadores.
 
 ---
 
-## 3. KG vendido em caixa
+## 3. KG e MT — PACKAGE_MEASURED
 
-O preço CISS representa 1 kg.
+O preço CISS representa 1 kg (`UNIT=KG`) ou 1 metro (`UNIT=MT`).
 
-Cadastro:
-`kg_por_caixa`
+Cadastro por SKU (tabela `product_sale_unit_config`):
+`quantity_per_sale_unit` — rótulo de UI `QT KG` ou `QT MT` conforme a UNIT.
 
-Preço-base da caixa:
+Preço-base da unidade de venda:
 
-`Pcaixa = Pciss_kg * kg_por_caixa`
+`Pvenda = Pciss_na_unit_origem * quantity_per_sale_unit`
 
-Exemplo:
+Exemplo (KG):
 - CISS = R$ 24,50/kg
-- caixa = 18 kg
-- preço-base caixa = R$ 441,00
+- `QT KG` = 18
+- preço-base da unidade de venda = R$ 441,00
+
+Sem `quantity_per_sale_unit` válido (`> 0`): `CONFIGURATION_REQUIRED`, não escrever preço.
 
 Não aplicar automaticamente o markup/atacado de fixadores.
 

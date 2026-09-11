@@ -124,19 +124,19 @@ Organizar em cards/seções:
 - Local;
 - Testar conexão.
 
-### Fixadores — CENTO
+### Fixadores — CT / HUNDRED (política FIXADOR_CENTO)
 - markup varejo;
 - quantidade atacado;
 - desconto atacado;
 - percentual estoque.
 
-### Produtos PC / UN
+### Produtos DIRECT (PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL)
 - política de preço;
 - política de estoque.
 
-### Produtos KG
+### Produtos KG / MT (PACKAGE_MEASURED)
 - comportamento;
-- link para Embalagens.
+- link para Embalagens (KG/MT).
 
 ### Sincronização
 - intervalo preço;
@@ -151,19 +151,23 @@ Organizar em cards/seções:
 
 Não exibir nomes de env em inglês como UX principal; podem aparecer em detalhe técnico.
 
-## Caixas → Embalagens
+## Caixas → Embalagens (KG e MT)
 
-Reaproveitar a área para cadastrar produtos KG.
+Reaproveitar a área para cadastrar produtos `KG` e `MT` (mapa OWNER_CONFIRMED em 11/09/2026, `CISS_UNIT_MAP.md`), sobre a tabela genérica `product_sale_unit_config`.
 
 Campos:
 - ID CISS;
 - SKU Wake;
 - produto;
-- UNIT CISS;
-- kg por caixa;
-- preço/kg;
-- preço calculado por caixa;
-- estoque kg;
-- caixas calculadas;
-- sobra kg;
-- status da configuração.
+- UNIT CISS (`KG` ou `MT`);
+- `quantity_per_sale_unit` (rótulo `QT KG` ou `QT MT` conforme a UNIT);
+- preço por unidade de origem (kg ou metro);
+- preço calculado da unidade de venda;
+- estoque na unidade de origem;
+- unidades de venda calculadas;
+- sobra (kg ou metros, exibida, não vendável);
+- status da configuração (`CONFIGURATION_REQUIRED` quando ausente/inválido).
+
+### Importação por planilha (roadmap; ver `ROADMAP.md` FASE 7 — não implementar agora)
+
+Upload `SKU | NOME | QT KG` (ou `QT MT`) → preview → validação contra a UNIT real do CISS → contagem de válidos/inválidos → confirmação → import → relatório → audit log.
