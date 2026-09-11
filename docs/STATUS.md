@@ -1,6 +1,6 @@
 # STATUS — Casa Hub
 
-Atualizado em 11/09/2026.
+Atualizado em 11/09/2026 (censo de UNITs + decisões OWNER_CONFIRMED).
 
 ## Produção
 
@@ -13,9 +13,9 @@ Atualizado em 11/09/2026.
 |---|---|---|
 | `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; a reconciliação ao vivo foi feita pelo reconciliador (linha abaixo). |
 | `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY. **Executado 1× em produção em 11/09/2026 (SHA `c7616d7`)**, só leitura, sem correções. Resultado em [PRODUCTION_RECONCILIATION.md](PRODUCTION_RECONCILIATION.md). Aguarda decisões (abaixo). |
-| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS. **Executado 1× em 11/09/2026.** Resultado em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md). Nada corrigido. |
+| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS **+ decisões de negócio OWNER_CONFIRMED em 11/09/2026.** Resultado em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md). Ainda **não implementado** (é doc + decisão; motor de produção não foi tocado). |
 
-## Censo de UNITs do CISS — `audit/ciss-unit-census`
+## Censo de UNITs do CISS + mapa canônico OWNER_CONFIRMED — `audit/ciss-unit-census`
 
 - Script `scripts/ciss-unit-census.ts` + `scripts/reconcile/unit-census.ts`; testes em `unit-census.test.ts`; coberto por `no-write-path.test.ts`.
 - Endpoint: `GET /products/stock?page=N&per_page=500` (listagem, sem `product_id`). O probe de 1 request deu 200 com paginação.
@@ -40,11 +40,18 @@ Atualizado em 11/09/2026.
   - KG 1;
   - outras 0;
   - sem registro 3.
-- Dicionário:
-  - `CT → CENTO` = **CANDIDATE / OWNER_CONFIRMATION_REQUIRED** (não há doc oficial de unidades);
-  - PC/UN → PIECE e KG → KG_PACKAGE = OWNER_PROPOSED;
-  - demais → UNSUPPORTED / FUTURE_RULE.
+- **Mapa canônico OWNER_CONFIRMED em 11/09/2026** (substitui os status CANDIDATE/PROPOSED anteriores; detalhes em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md)):
+  - `CT → HUNDRED` (HundredUnitStrategy). Normalização: `base_unit_price = ciss_price/100`, `physical_units = ciss_stock*100`. Política comercial FIXADOR_CENTO (+20%/−20% atacado, 10% de exposição de estoque) é **separada** da normalização — não vai no adapter do CISS.
+  - `PC, UN, JG, PR, CJ, RL, KT, CX, LT, PL → DIRECT` (DirectUnitStrategy): `wake_price = ciss_price`, `wake_stock = floor(max(ciss_stock,0))`. Sem ÷100/×100, sem 10%/markup/atacado de fixadores, sem dedução pelo nome do produto.
+  - `KG, MT → PACKAGE_MEASURED` (MeasuredPackageUnitStrategy), com `quantity_per_sale_unit` por SKU (`QT KG` / `QT MT`). Sem configuração válida → `CONFIGURATION_REQUIRED`, zero write.
+  - UNIT nova fora do mapa → `UNSUPPORTED_UNIT`, fail closed, nunca vira DIRECT ou HUNDRED por padrão.
+- Modelagem recomendada (ainda **não criada**): tabela genérica `product_sale_unit_config` (não uma tabela por UNIT), com roadmap de importação por planilha (KG/MT), validada contra a UNIT real do CISS.
+- **Implementação adiada de propósito** para `feat/unit-strategies` (a criar a partir da `origin/main`, só depois de aprovação e merge desta fase de doc/auditoria). Nesta rodada não se mexeu em motor de preço, motor de estoque, sync, Wake client, banco, UI ou scheduler; não se escreveu na Wake; não se corrigiram os 16 PC nem o KG; nenhuma migration foi criada.
 - Relatório por produto só em `artifacts-private/ciss-unit-census-20260911.{json,csv}` (fora do Git).
+
+### Documentos canônicos citados pelo pedido — ausentes nesta branch
+
+`docs/BUSINESS_RULES.md`, `docs/PRICE_RULES.md`, `docs/INVENTORY_RULES.md`, `docs/ARCHITECTURE_TARGET.md`, `docs/ROADMAP.md` e `docs/UI_UX_REQUIREMENTS.md` **não existem** na árvore de `audit/ciss-unit-census` (nem na `audit/reconciliacao-readonly`, sua base). Eles existem só em `audit/fase-0-runtime-readonly` (commit `62e54e7`, ainda sem merge na `main`). Por instrução explícita, não foram recriados aqui por memória — recriar geraria uma versão conflitante e não teríamos como reconciliar as duas depois. Quando `audit/fase-0-runtime-readonly` for integrada (ou revista), as decisões OWNER_CONFIRMED acima precisam ser propagadas para esses documentos.
 
 ## Reconciliador READ-ONLY — `audit/reconciliacao-readonly`
 
@@ -86,10 +93,10 @@ A FASE 0 afirmou que a fórmula de estoque de produção (`Math.floor(s*100*0.10
 
 ## Pendências conhecidas (aguardando aprovação — nada corrigido)
 
-- **CT = CENTO?** O CISS usa `"CT"` e não `"CENTO"`. O censo não achou definição oficial, então segue CANDIDATE. Mapear é mudança funcional na regra; precisa de aprovação e de uma nova execução.
-- **9 UNITs sem regra** (JG, PR, CJ, RL, MT, KT, CX, LT, PL; 1575 produtos no catálogo, 0 na whitelist). Precisam de regra antes de entrar na whitelist.
+- **CT = CENTO — OWNER_CONFIRMED em 11/09/2026.** O mapa canônico em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md) já reflete a decisão. Falta implementar: motor de produção ainda ignora `unit` e aplica CENTO a tudo.
+- **9 UNITs antes sem regra (JG, PR, CJ, RL, MT, KT, CX, LT, PL) — OWNER_CONFIRMED como DIRECT** (exceto MT, que é PACKAGE_MEASURED). 1575 produtos no catálogo, 0 na whitelist hoje. Falta implementar.
 - **Histórico do Git** ainda contém os relatórios por SKU da reconciliação (`95204fd`, `d92f059`). A mitigação é o repositório ficar privado; não houve force-push.
-- **16 produtos PC publicados com a fórmula CENTO na Wake** (preço ÷100 ×1,2; estoque ×100 ×10%). Isso confirma que o motor de produção ignora `unit`. A correção fica fora de escopo até aprovação.
-- **KG sem `kg_por_caixa`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Nenhuma migration criada, de propósito.
+- **16 produtos PC publicados com a fórmula CENTO na Wake** (preço ÷100 ×1,2; estoque ×100 ×10%), quando a regra OWNER_CONFIRMED é DIRECT (1:1). Confirma que o motor de produção ignora `unit`. A correção fica para `feat/unit-strategies`, fora de escopo até lá.
+- **KG sem `quantity_per_sale_unit`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Nenhuma migration criada, de propósito; a modelagem genérica `product_sale_unit_config` ainda não existe.
 - **Promoção 10365:** falta confirmar a semântica da condição 4 / lógica 3 / `23085` e da ação 2.
 - **3 SKUs sem saldo no CISS** (1273, 28875, 28899; o 28875 também sem `retail_price`): pedir ao SIGAS.
