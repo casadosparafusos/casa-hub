@@ -15,18 +15,18 @@ Casa HUB é a aplicação interna da Casa dos Parafusos responsável por sincron
 ## Ordem obrigatória de leitura para qualquer agente
 
 1. `README.md`
-2. `DOCS/STATUS.md`
-3. `DOCS/BUSINESS_RULES.md`
-4. `DOCS/PRICE_RULES.md`
-5. `DOCS/INVENTORY_RULES.md`
-6. `DOCS/UI_UX_REQUIREMENTS.md`
-7. `DOCS/ARCHITECTURE_TARGET.md`
-8. `DOCS/ROADMAP.md`
-9. `DOCS/REPO_WORKFLOW.md`
-10. `DOCS/VALIDATION_PROTOCOL.md`
-11. `DOCS/PRODUCTION_RECONCILIATION.md`
-12. `DOCS/RECONCILIATION_READONLY.md`
-13. `DOCS/CISS_UNIT_MAP.md`
+2. `docs/STATUS.md`
+3. `docs/BUSINESS_RULES.md`
+4. `docs/PRICE_RULES.md`
+5. `docs/INVENTORY_RULES.md`
+6. `docs/UI_UX_REQUIREMENTS.md`
+7. `docs/ARCHITECTURE_TARGET.md`
+8. `docs/ROADMAP.md`
+9. `docs/REPO_WORKFLOW.md`
+10. `docs/VALIDATION_PROTOCOL.md`
+11. `docs/PRODUCTION_RECONCILIATION.md`
+12. `docs/RECONCILIATION_READONLY.md`
+13. `docs/CISS_UNIT_MAP.md`
 14. Git real: branch, HEAD, `origin/main`, diff e PR atual.
 
 Conversas antigas e comentários históricos nunca prevalecem sobre Git + documentos canônicos acima.
@@ -44,7 +44,7 @@ Conversas antigas e comentários históricos nunca prevalecem sobre Git + docume
 - Merge somente após aprovação explícita do usuário.
 - Nunca force-push.
 - Nunca `reset --hard` como forma de sincronização.
-- Sempre atualizar `DOCS/STATUS.md` antes do fim da rodada.
+- Sempre atualizar `docs/STATUS.md` antes do fim da rodada.
 
 ## Regra de segurança operacional
 

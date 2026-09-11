@@ -18,16 +18,16 @@ Baseline Git auditado pelo ChatGPT:
 Leia integralmente:
 1. `README.md`
 2. `CLAUDE.md`
-3. `DOCS/STATUS.md`
-4. `DOCS/BUSINESS_RULES.md`
-5. `DOCS/PRICE_RULES.md`
-6. `DOCS/INVENTORY_RULES.md`
-7. `DOCS/UI_UX_REQUIREMENTS.md`
-8. `DOCS/ARCHITECTURE_TARGET.md`
-9. `DOCS/AUDIT.md`
-10. `DOCS/ROADMAP.md`
-11. `DOCS/REPO_WORKFLOW.md`
-12. `DOCS/VALIDATION_PROTOCOL.md`
+3. `docs/STATUS.md`
+4. `docs/BUSINESS_RULES.md`
+5. `docs/PRICE_RULES.md`
+6. `docs/INVENTORY_RULES.md`
+7. `docs/UI_UX_REQUIREMENTS.md`
+8. `docs/ARCHITECTURE_TARGET.md`
+9. `docs/AUDIT.md`
+10. `docs/ROADMAP.md`
+11. `docs/REPO_WORKFLOW.md`
+12. `docs/VALIDATION_PROTOCOL.md`
 
 Depois registre:
 - `git status`
@@ -159,8 +159,8 @@ Sem kg_por_caixa:
 
 Primeiro:
 1. audite;
-2. preencha `DOCS/PRODUCTION_RECONCILIATION.md`;
-3. atualize `DOCS/STATUS.md`;
+2. preencha `docs/PRODUCTION_RECONCILIATION.md`;
+3. atualize `docs/STATUS.md`;
 4. gere `AUDIT_RUNTIME_REPORT.md`;
 5. pare e reporte.
 

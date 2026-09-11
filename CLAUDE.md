@@ -9,18 +9,18 @@ Baseline auditado: `053434ce0209c406add5020fe1c2d259d138e165`.
 Leia integralmente:
 
 - `README.md`
-- `DOCS/STATUS.md`
-- `DOCS/BUSINESS_RULES.md`
-- `DOCS/PRICE_RULES.md`
-- `DOCS/INVENTORY_RULES.md`
-- `DOCS/UI_UX_REQUIREMENTS.md`
-- `DOCS/ARCHITECTURE_TARGET.md`
-- `DOCS/ROADMAP.md`
-- `DOCS/REPO_WORKFLOW.md`
-- `DOCS/VALIDATION_PROTOCOL.md`
-- `DOCS/CISS_UNIT_MAP.md`
-- `DOCS/PRODUCTION_RECONCILIATION.md`
-- `DOCS/RECONCILIATION_READONLY.md`
+- `docs/STATUS.md`
+- `docs/BUSINESS_RULES.md`
+- `docs/PRICE_RULES.md`
+- `docs/INVENTORY_RULES.md`
+- `docs/UI_UX_REQUIREMENTS.md`
+- `docs/ARCHITECTURE_TARGET.md`
+- `docs/ROADMAP.md`
+- `docs/REPO_WORKFLOW.md`
+- `docs/VALIDATION_PROTOCOL.md`
+- `docs/CISS_UNIT_MAP.md`
+- `docs/PRODUCTION_RECONCILIATION.md`
+- `docs/RECONCILIATION_READONLY.md`
 
 Depois registre:
 - `git status`
@@ -83,7 +83,7 @@ Nenhuma política de markup/atacado deve ser automaticamente herdada por DIRECT 
 
 ## Encerramento obrigatório
 
-Atualize `DOCS/STATUS.md`, faça push da branch e retorne:
+Atualize `docs/STATUS.md`, faça push da branch e retorne:
 - branch;
 - SHA;
 - arquivos;
