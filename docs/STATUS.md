@@ -1,6 +1,6 @@
 # STATUS — Casa Hub
 
-Atualizado em 10/09/2026.
+Atualizado em 11/09/2026.
 
 ## Produção
 
@@ -11,43 +11,51 @@ Atualizado em 10/09/2026.
 
 | Branch | Base | Estado |
 |---|---|---|
-| `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; reconciliação ao vivo pendente (ver abaixo). |
-| `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY implementado e testado com mocks. **Nunca executado no servidor.** Aguarda aprovação para UMA execução. |
+| `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; a reconciliação ao vivo foi feita pelo reconciliador (linha abaixo). |
+| `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY. **Executado 1× em produção em 11/09/2026 (SHA `c7616d7`)**, só leitura, sem correções. Resultado em [PRODUCTION_RECONCILIATION.md](PRODUCTION_RECONCILIATION.md). Aguarda decisões (abaixo). |
 
 ## Reconciliador READ-ONLY — `audit/reconciliacao-readonly`
 
 Detalhes em [RECONCILIATION_READONLY.md](RECONCILIATION_READONLY.md).
 
 - Script: `scripts/reconcile-readonly.ts`; módulos em `scripts/reconcile/`.
-- Compara CISS real → UNIT (campo `unit` do CISS) → regra esperada → Wake real, e grava `artifacts/reconciliation-YYYYMMDD-HHMM.{json,csv}`.
+- Compara CISS real → UNIT (campo `unit` do CISS) → regra esperada → Wake real, e grava `reconciliation-YYYYMMDD-HHMM.{json,csv}`.
 - **Sem write path:**
   - Wake/CISS só GET;
   - SQLite `readonly` + `query_only`;
   - nenhum import de sync, cliente Wake, settings ou db da aplicação;
   - provado por `no-write-path.test.ts`.
-- Rate limit Wake: ≤ 30 req/min, cursor de 50 em `/produtos`, aborta no primeiro 429.
-- Testes: `scripts/reconcile/*.test.ts`. Cobrem:
-  - CENTO, PC, UN, KG com e sem embalagem, unsupported;
-  - ausência no CISS e ausência na Wake;
-  - mismatch de preço e de estoque;
-  - cursor com mais de 50 itens;
-  - 429 abortando com segurança;
-  - ausência de segredos no relatório.
+- Rate limit Wake: ≤ 30 req/min, cursor de 50 em `/produtos` com `camposAdicionais=Estoque` em toda página, aborta no primeiro 429/401/403.
+- Estoque Wake sem `estoque[]` → `ERROR` (não verificável), nunca `STOCK_MISMATCH` em massa.
+- CISS: concorrência 1 por padrão (`--ciss-concurrency` opcional, de 1 a 4).
+- Promoção estrita: `PASS` só se provar ativo, vigente, quantidade 100, desconto percentual de 20 e escopo; senão `UNVERIFIED` com o `raw` preservado.
+- Testes: 10 arquivos, 164 testes (`scripts/reconcile/*.test.ts`).
+
+### Execução em produção — 11/09/2026 (única)
+
+- SHA `c7616d7`, rodado em `/tmp/reconcile-20260911-1021` como `erpwake`.
+- Duração **15 min 13 s**; exit 0.
+- Requests: Wake 144 (0 respostas não-2xx), CISS 2334.
+- Wake 2318/2318 encontrados; estoque Wake verificável (4800/4800 com `estoque[]`); errors 0.
+- UNIT CISS:
+  - **CT 2298** (unsupported);
+  - PC 16;
+  - KG 1;
+  - CENTO 0; UN 0; missing 0.
+- Comparações (só as linhas PC): preço 0 match / 16 mismatch; estoque 3 / 13; tabela 74 0 / 16.
+- CISS_MISSING 3 (1273, 28875, 28899); CONFIGURATION_REQUIRED 1 (KG 12852).
+- Promoção 10365: `UNVERIFIED`. A Wake devolve a condição 4 (argumentos 23085 e 100) e a ação 2 (20.00), sem descritor textual nem lista de produtos.
+- Arquivos (JSON, CSV, plan, log) em `docs/reconciliation/`; os originais continuam em `/tmp/reconcile-20260911-1021/` no servidor.
+- Simulação informativa: aplicando CENTO às linhas CT, 2297 de 2298 bateriam em preço, tabela e estoque. **Não** é resultado oficial; a regra não foi alterada.
 
 ### Correção registrada (borda de ponto flutuante)
 
-A FASE 0 afirmou que a fórmula de estoque de produção (`Math.floor(s*100*0.10)`) poderia perder 1 unidade por ruído de float (ex.: 2,3 → 22). **A afirmação estava errada.** Em JS, `2.3*100*0.1 === 23`, e uma busca exaustiva em todos os valores com até 3 casas decimais entre 0 e 1000 não encontrou nenhuma divergência. O reconciliador ainda usa um `safeFloor` defensivo e marca `floatEdgeNote` se algum valor real divergir, mas isso não é um bug conhecido de produção.
+A FASE 0 afirmou que a fórmula de estoque de produção (`Math.floor(s*100*0.10)`) poderia perder 1 unidade por ruído de float (ex.: 2,3 → 22). **A afirmação estava errada.** Em JS, `2.3*100*0.1 === 23`, e uma busca exaustiva em todos os valores com até 3 casas decimais entre 0 e 1000 não encontrou nenhuma divergência. O reconciliador ainda usa um `safeFloor` defensivo e marca `floatEdgeNote` se algum valor real divergir. Nenhum valor real divergiu na execução de 11/09.
 
-### Execução proposta (aguardando aprovação — UMA vez)
+## Pendências conhecidas (aguardando aprovação — nada corrigido)
 
-1. Copiar o conteúdo da branch para um diretório temporário no servidor (não tocar em `/opt/erp-wake`).
-2. Como `erpwake`: `tsx <tmp>/scripts/reconcile-readonly.ts --root /opt/erp-wake --env-file /opt/erp-wake/.env --plan` (sem rede; confirma a whitelist, o intervalo e a estimativa).
-3. Se o plano estiver ok: a mesma linha sem `--plan` e com `--out <tmp>/out`.
-4. Trazer só os artefatos (sem segredo; varridos antes de gravar) e analisar. **Não corrigir divergências** nesta fase.
-
-Estimativa: Wake ~95 a ~450 GETs (~3 a 15 min a 30 req/min); CISS ~2.334 GETs (~5 a 15 min).
-
-## Pendências conhecidas
-
-- KG sem `kg_por_caixa` → `CONFIGURATION_REQUIRED`. O cadastro de embalagem ainda não existe (nenhuma migration criada, de propósito).
-- Correções de UNIT no motor de produção (hoje trata tudo como CENTO) só depois da reconciliação real e de aprovação.
+- **CT = CENTO?** O CISS usa `"CT"` e não `"CENTO"`. Mapear é mudança funcional na regra; precisa de aprovação e de uma nova execução.
+- **16 produtos PC publicados com a fórmula CENTO na Wake** (preço ÷100 ×1,2; estoque ×100 ×10%). Isso confirma que o motor de produção ignora `unit`. A correção fica fora de escopo até aprovação.
+- **KG sem `kg_por_caixa`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Nenhuma migration criada, de propósito.
+- **Promoção 10365:** falta confirmar a semântica da condição 4 / lógica 3 / `23085` e da ação 2.
+- **3 SKUs sem saldo no CISS** (1273, 28875, 28899; o 28875 também sem `retail_price`): pedir ao SIGAS.

@@ -1,0 +1,20 @@
+2026-09-11T13:21:50.891Z [env] 6 variaveis carregadas de .env (valores nao exibidos)
+2026-09-11T13:21:50.892Z [db] lendo em modo somente-leitura: /opt/erp-wake/data/app.db
+2026-09-11T13:21:50.919Z [db] 2318 produtos ativos; CD=25 tabela=74 promocao=10365 CISS empresa=2 local=2
+2026-09-11T13:21:50.919Z [db] intervalo produtoVarianteId da whitelist: 278078..283202
+2026-09-11T13:21:50.919Z [plan] Wake GET /produtos: <= 103 (limite superior pelo intervalo; real = variantes existentes no intervalo / 50) paginas; GET /tabelaPrecos/74/produtos: ~48 paginas (se a tabela tiver so a whitelist); GET /promocoes/10365: 1
+2026-09-11T13:21:50.919Z [plan] Wake: 1 request a cada 2s (30 req/min) -- tempo ~ total de requests / 30 minutos
+2026-09-11T13:21:50.919Z [plan] CISS: 16 requests de preco + 2318 de estoque (concorrencia 1, sequencial)
+2026-09-11T13:21:50.919Z [plan] ---- confirmacao ----
+2026-09-11T13:21:50.919Z [plan] produtos ativos (whitelist)  = 2318
+2026-09-11T13:21:50.919Z [plan] Wake CD                      = 25
+2026-09-11T13:21:50.919Z [plan] Wake tabela de preco         = 74
+2026-09-11T13:21:50.919Z [plan] Wake promocao                = 10365
+2026-09-11T13:21:50.919Z [plan] CISS empresa                 = 2 (default)
+2026-09-11T13:21:50.919Z [plan] CISS local                   = 2 (settings/env)
+2026-09-11T13:21:50.919Z [plan] full-scan                    = false
+2026-09-11T13:21:50.919Z [plan] GET /produtos camposAdicionais = Estoque
+2026-09-11T13:21:50.919Z [plan] CISS stock concurrency       = 1
+2026-09-11T13:21:50.919Z [plan] Wake teto                    = 30 req/min; aborta no 1o 429/401/403
+2026-09-11T13:21:50.919Z [plan] saida                        = /tmp/reconcile-20260911-1021/out
+2026-09-11T13:21:50.919Z [plan] nenhuma chamada de rede feita (--plan)
