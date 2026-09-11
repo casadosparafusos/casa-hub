@@ -13,6 +13,38 @@ Atualizado em 11/09/2026.
 |---|---|---|
 | `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; a reconciliação ao vivo foi feita pelo reconciliador (linha abaixo). |
 | `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY. **Executado 1× em produção em 11/09/2026 (SHA `c7616d7`)**, só leitura, sem correções. Resultado em [PRODUCTION_RECONCILIATION.md](PRODUCTION_RECONCILIATION.md). Aguarda decisões (abaixo). |
+| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS. **Executado 1× em 11/09/2026.** Resultado em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md). Nada corrigido. |
+
+## Censo de UNITs do CISS — `audit/ciss-unit-census`
+
+- Script `scripts/ciss-unit-census.ts` + `scripts/reconcile/unit-census.ts`; testes em `unit-census.test.ts`; coberto por `no-write-path.test.ts`.
+- Endpoint: `GET /products/stock?page=N&per_page=500` (listagem, sem `product_id`). O probe de 1 request deu 200 com paginação.
+- **45 páginas, 22323 produtos**, 0 repetidos, 69 s.
+- Requests: CISS 46 (1 probe + 45), **Wake 0**. **0 writes**.
+- **13 UNITs:**
+  - PC 13504;
+  - CT 6808;
+  - JG 741;
+  - PR 516;
+  - KG 408;
+  - CJ 152;
+  - RL 78;
+  - MT 76;
+  - UN 28;
+  - KT 5; CX 5; LT 1; PL 1.
+  - Nenhuma variação de caixa ou espaço; nenhuma vazia.
+- Whitelist (2318):
+  - CT 2298;
+  - PC 16;
+  - UN 0;
+  - KG 1;
+  - outras 0;
+  - sem registro 3.
+- Dicionário:
+  - `CT → CENTO` = **CANDIDATE / OWNER_CONFIRMATION_REQUIRED** (não há doc oficial de unidades);
+  - PC/UN → PIECE e KG → KG_PACKAGE = OWNER_PROPOSED;
+  - demais → UNSUPPORTED / FUTURE_RULE.
+- Relatório por produto só em `artifacts-private/ciss-unit-census-20260911.{json,csv}` (fora do Git).
 
 ## Reconciliador READ-ONLY — `audit/reconciliacao-readonly`
 
@@ -54,7 +86,9 @@ A FASE 0 afirmou que a fórmula de estoque de produção (`Math.floor(s*100*0.10
 
 ## Pendências conhecidas (aguardando aprovação — nada corrigido)
 
-- **CT = CENTO?** O CISS usa `"CT"` e não `"CENTO"`. Mapear é mudança funcional na regra; precisa de aprovação e de uma nova execução.
+- **CT = CENTO?** O CISS usa `"CT"` e não `"CENTO"`. O censo não achou definição oficial, então segue CANDIDATE. Mapear é mudança funcional na regra; precisa de aprovação e de uma nova execução.
+- **9 UNITs sem regra** (JG, PR, CJ, RL, MT, KT, CX, LT, PL; 1575 produtos no catálogo, 0 na whitelist). Precisam de regra antes de entrar na whitelist.
+- **Histórico do Git** ainda contém os relatórios por SKU da reconciliação (`95204fd`, `d92f059`). A mitigação é o repositório ficar privado; não houve force-push.
 - **16 produtos PC publicados com a fórmula CENTO na Wake** (preço ÷100 ×1,2; estoque ×100 ×10%). Isso confirma que o motor de produção ignora `unit`. A correção fica fora de escopo até aprovação.
 - **KG sem `kg_por_caixa`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Nenhuma migration criada, de propósito.
 - **Promoção 10365:** falta confirmar a semântica da condição 4 / lógica 3 / `23085` e da ação 2.
