@@ -1,0 +1,184 @@
+2026-09-11T13:22:29.300Z [env] 6 variaveis carregadas de .env (valores nao exibidos)
+2026-09-11T13:22:29.300Z [db] lendo em modo somente-leitura: /opt/erp-wake/data/app.db
+2026-09-11T13:22:29.322Z [db] 2318 produtos ativos; CD=25 tabela=74 promocao=10365 CISS empresa=2 local=2
+2026-09-11T13:22:29.322Z [db] intervalo produtoVarianteId da whitelist: 278078..283202
+2026-09-11T13:22:29.323Z [auth] token Wake: env; token CISS: db (valores nunca exibidos)
+2026-09-11T13:22:29.326Z [wake] GET /produtos CD=25 intervalo 278078..283202
+2026-09-11T13:22:30.394Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278077 -> 200 (rate-limit restante=119)
+2026-09-11T13:22:31.576Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278127 -> 200 (rate-limit restante=118)
+2026-09-11T13:22:33.629Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278177 -> 200 (rate-limit restante=117)
+2026-09-11T13:22:35.541Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278227 -> 200 (rate-limit restante=116)
+2026-09-11T13:22:37.537Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278278 -> 200 (rate-limit restante=115)
+2026-09-11T13:22:39.558Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278330 -> 200 (rate-limit restante=114)
+2026-09-11T13:22:41.569Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278380 -> 200 (rate-limit restante=113)
+2026-09-11T13:22:43.562Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278430 -> 200 (rate-limit restante=112)
+2026-09-11T13:22:45.698Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278480 -> 200 (rate-limit restante=111)
+2026-09-11T13:22:47.564Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278530 -> 200 (rate-limit restante=110)
+2026-09-11T13:22:49.549Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278580 -> 200 (rate-limit restante=109)
+2026-09-11T13:22:51.546Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278630 -> 200 (rate-limit restante=108)
+2026-09-11T13:22:53.549Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278680 -> 200 (rate-limit restante=107)
+2026-09-11T13:22:55.644Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278730 -> 200 (rate-limit restante=106)
+2026-09-11T13:22:57.549Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278789 -> 200 (rate-limit restante=105)
+2026-09-11T13:22:59.553Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278839 -> 200 (rate-limit restante=104)
+2026-09-11T13:23:01.580Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278889 -> 200 (rate-limit restante=103)
+2026-09-11T13:23:03.557Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278939 -> 200 (rate-limit restante=102)
+2026-09-11T13:23:05.556Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=278989 -> 200 (rate-limit restante=101)
+2026-09-11T13:23:07.557Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279039 -> 200 (rate-limit restante=100)
+2026-09-11T13:23:09.561Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279090 -> 200 (rate-limit restante=99)
+2026-09-11T13:23:11.582Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279141 -> 200 (rate-limit restante=98)
+2026-09-11T13:23:13.563Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279191 -> 200 (rate-limit restante=97)
+2026-09-11T13:23:15.570Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279244 -> 200 (rate-limit restante=96)
+2026-09-11T13:23:17.558Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279296 -> 200 (rate-limit restante=95)
+2026-09-11T13:23:19.591Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279356 -> 200 (rate-limit restante=94)
+2026-09-11T13:23:21.573Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279410 -> 200 (rate-limit restante=93)
+2026-09-11T13:23:23.587Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279460 -> 200 (rate-limit restante=92)
+2026-09-11T13:23:25.570Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279510 -> 200 (rate-limit restante=91)
+2026-09-11T13:23:27.572Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279560 -> 200 (rate-limit restante=90)
+2026-09-11T13:23:29.580Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279610 -> 200 (rate-limit restante=89)
+2026-09-11T13:23:31.577Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279660 -> 200 (rate-limit restante=119)
+2026-09-11T13:23:33.590Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279710 -> 200 (rate-limit restante=118)
+2026-09-11T13:23:35.571Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279760 -> 200 (rate-limit restante=117)
+2026-09-11T13:23:37.570Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279810 -> 200 (rate-limit restante=116)
+2026-09-11T13:23:39.586Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279860 -> 200 (rate-limit restante=115)
+2026-09-11T13:23:41.587Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279910 -> 200 (rate-limit restante=114)
+2026-09-11T13:23:43.577Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=279960 -> 200 (rate-limit restante=113)
+2026-09-11T13:23:45.577Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280010 -> 200 (rate-limit restante=112)
+2026-09-11T13:23:47.606Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280060 -> 200 (rate-limit restante=111)
+2026-09-11T13:23:49.580Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280110 -> 200 (rate-limit restante=110)
+2026-09-11T13:23:51.583Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280160 -> 200 (rate-limit restante=109)
+2026-09-11T13:23:53.610Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280210 -> 200 (rate-limit restante=108)
+2026-09-11T13:23:55.594Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280330 -> 200 (rate-limit restante=107)
+2026-09-11T13:23:57.586Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280380 -> 200 (rate-limit restante=106)
+2026-09-11T13:23:59.599Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280430 -> 200 (rate-limit restante=105)
+2026-09-11T13:24:01.771Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280480 -> 200 (rate-limit restante=104)
+2026-09-11T13:24:03.612Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280530 -> 200 (rate-limit restante=103)
+2026-09-11T13:24:05.608Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280845 -> 200 (rate-limit restante=102)
+2026-09-11T13:24:07.589Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280896 -> 200 (rate-limit restante=101)
+2026-09-11T13:24:09.631Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280946 -> 200 (rate-limit restante=100)
+2026-09-11T13:24:11.592Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=280996 -> 200 (rate-limit restante=99)
+2026-09-11T13:24:13.632Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281046 -> 200 (rate-limit restante=98)
+2026-09-11T13:24:15.592Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281096 -> 200 (rate-limit restante=97)
+2026-09-11T13:24:17.590Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281146 -> 200 (rate-limit restante=96)
+2026-09-11T13:24:19.591Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281196 -> 200 (rate-limit restante=95)
+2026-09-11T13:24:21.600Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281246 -> 200 (rate-limit restante=94)
+2026-09-11T13:24:23.616Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281296 -> 200 (rate-limit restante=93)
+2026-09-11T13:24:25.598Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281346 -> 200 (rate-limit restante=92)
+2026-09-11T13:24:27.598Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281396 -> 200 (rate-limit restante=91)
+2026-09-11T13:24:29.604Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281446 -> 200 (rate-limit restante=90)
+2026-09-11T13:24:31.624Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281496 -> 200 (rate-limit restante=119)
+2026-09-11T13:24:33.601Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281546 -> 200 (rate-limit restante=118)
+2026-09-11T13:24:35.626Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281596 -> 200 (rate-limit restante=117)
+2026-09-11T13:24:37.600Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281646 -> 200 (rate-limit restante=116)
+2026-09-11T13:24:39.608Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281696 -> 200 (rate-limit restante=115)
+2026-09-11T13:24:41.640Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281746 -> 200 (rate-limit restante=114)
+2026-09-11T13:24:43.617Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281796 -> 200 (rate-limit restante=113)
+2026-09-11T13:24:45.604Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281846 -> 200 (rate-limit restante=112)
+2026-09-11T13:24:47.633Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281896 -> 200 (rate-limit restante=111)
+2026-09-11T13:24:49.615Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281946 -> 200 (rate-limit restante=110)
+2026-09-11T13:24:51.637Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=281996 -> 200 (rate-limit restante=109)
+2026-09-11T13:24:53.631Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282046 -> 200 (rate-limit restante=108)
+2026-09-11T13:24:55.632Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282096 -> 200 (rate-limit restante=107)
+2026-09-11T13:24:57.621Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282147 -> 200 (rate-limit restante=106)
+2026-09-11T13:24:59.614Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282197 -> 200 (rate-limit restante=105)
+2026-09-11T13:25:01.612Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282248 -> 200 (rate-limit restante=104)
+2026-09-11T13:25:03.617Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282298 -> 200 (rate-limit restante=103)
+2026-09-11T13:25:05.634Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282348 -> 200 (rate-limit restante=102)
+2026-09-11T13:25:07.635Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282398 -> 200 (rate-limit restante=101)
+2026-09-11T13:25:09.659Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282448 -> 200 (rate-limit restante=100)
+2026-09-11T13:25:11.620Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282498 -> 200 (rate-limit restante=99)
+2026-09-11T13:25:13.640Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282548 -> 200 (rate-limit restante=98)
+2026-09-11T13:25:15.628Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282598 -> 200 (rate-limit restante=97)
+2026-09-11T13:25:17.634Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282648 -> 200 (rate-limit restante=96)
+2026-09-11T13:25:19.633Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282698 -> 200 (rate-limit restante=95)
+2026-09-11T13:25:21.629Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282748 -> 200 (rate-limit restante=94)
+2026-09-11T13:25:23.633Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282798 -> 200 (rate-limit restante=93)
+2026-09-11T13:25:25.632Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282848 -> 200 (rate-limit restante=92)
+2026-09-11T13:25:27.744Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282898 -> 200 (rate-limit restante=91)
+2026-09-11T13:25:29.636Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282948 -> 200 (rate-limit restante=90)
+2026-09-11T13:25:31.635Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=282998 -> 200 (rate-limit restante=119)
+2026-09-11T13:25:33.634Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=283048 -> 200 (rate-limit restante=118)
+2026-09-11T13:25:35.637Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=283098 -> 200 (rate-limit restante=117)
+2026-09-11T13:25:37.636Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=283148 -> 200 (rate-limit restante=116)
+2026-09-11T13:25:39.665Z [wake] GET /produtos?centrosDistribuicao=25&quantidadeRegistros=50&camposAdicionais=Estoque&produtoVarianteIdDe=283198 -> 200 (rate-limit restante=115)
+2026-09-11T13:25:41.599Z [wake] GET /tabelaPrecos/74/produtos?pagina=1&quantidadeRegistros=50 -> 200 (rate-limit restante=119)
+2026-09-11T13:25:43.590Z [wake] GET /tabelaPrecos/74/produtos?pagina=2&quantidadeRegistros=50 -> 200 (rate-limit restante=118)
+2026-09-11T13:25:45.593Z [wake] GET /tabelaPrecos/74/produtos?pagina=3&quantidadeRegistros=50 -> 200 (rate-limit restante=117)
+2026-09-11T13:25:47.593Z [wake] GET /tabelaPrecos/74/produtos?pagina=4&quantidadeRegistros=50 -> 200 (rate-limit restante=116)
+2026-09-11T13:25:49.598Z [wake] GET /tabelaPrecos/74/produtos?pagina=5&quantidadeRegistros=50 -> 200 (rate-limit restante=115)
+2026-09-11T13:25:51.597Z [wake] GET /tabelaPrecos/74/produtos?pagina=6&quantidadeRegistros=50 -> 200 (rate-limit restante=114)
+2026-09-11T13:25:53.610Z [wake] GET /tabelaPrecos/74/produtos?pagina=7&quantidadeRegistros=50 -> 200 (rate-limit restante=113)
+2026-09-11T13:25:55.601Z [wake] GET /tabelaPrecos/74/produtos?pagina=8&quantidadeRegistros=50 -> 200 (rate-limit restante=112)
+2026-09-11T13:25:57.602Z [wake] GET /tabelaPrecos/74/produtos?pagina=9&quantidadeRegistros=50 -> 200 (rate-limit restante=111)
+2026-09-11T13:25:59.727Z [wake] GET /tabelaPrecos/74/produtos?pagina=10&quantidadeRegistros=50 -> 200 (rate-limit restante=110)
+2026-09-11T13:26:01.606Z [wake] GET /tabelaPrecos/74/produtos?pagina=11&quantidadeRegistros=50 -> 200 (rate-limit restante=109)
+2026-09-11T13:26:03.609Z [wake] GET /tabelaPrecos/74/produtos?pagina=12&quantidadeRegistros=50 -> 200 (rate-limit restante=108)
+2026-09-11T13:26:05.604Z [wake] GET /tabelaPrecos/74/produtos?pagina=13&quantidadeRegistros=50 -> 200 (rate-limit restante=107)
+2026-09-11T13:26:07.609Z [wake] GET /tabelaPrecos/74/produtos?pagina=14&quantidadeRegistros=50 -> 200 (rate-limit restante=106)
+2026-09-11T13:26:09.606Z [wake] GET /tabelaPrecos/74/produtos?pagina=15&quantidadeRegistros=50 -> 200 (rate-limit restante=105)
+2026-09-11T13:26:11.609Z [wake] GET /tabelaPrecos/74/produtos?pagina=16&quantidadeRegistros=50 -> 200 (rate-limit restante=104)
+2026-09-11T13:26:13.610Z [wake] GET /tabelaPrecos/74/produtos?pagina=17&quantidadeRegistros=50 -> 200 (rate-limit restante=103)
+2026-09-11T13:26:15.613Z [wake] GET /tabelaPrecos/74/produtos?pagina=18&quantidadeRegistros=50 -> 200 (rate-limit restante=102)
+2026-09-11T13:26:17.614Z [wake] GET /tabelaPrecos/74/produtos?pagina=19&quantidadeRegistros=50 -> 200 (rate-limit restante=101)
+2026-09-11T13:26:19.617Z [wake] GET /tabelaPrecos/74/produtos?pagina=20&quantidadeRegistros=50 -> 200 (rate-limit restante=100)
+2026-09-11T13:26:21.618Z [wake] GET /tabelaPrecos/74/produtos?pagina=21&quantidadeRegistros=50 -> 200 (rate-limit restante=99)
+2026-09-11T13:26:23.619Z [wake] GET /tabelaPrecos/74/produtos?pagina=22&quantidadeRegistros=50 -> 200 (rate-limit restante=98)
+2026-09-11T13:26:25.626Z [wake] GET /tabelaPrecos/74/produtos?pagina=23&quantidadeRegistros=50 -> 200 (rate-limit restante=97)
+2026-09-11T13:26:27.622Z [wake] GET /tabelaPrecos/74/produtos?pagina=24&quantidadeRegistros=50 -> 200 (rate-limit restante=96)
+2026-09-11T13:26:29.625Z [wake] GET /tabelaPrecos/74/produtos?pagina=25&quantidadeRegistros=50 -> 200 (rate-limit restante=95)
+2026-09-11T13:26:31.625Z [wake] GET /tabelaPrecos/74/produtos?pagina=26&quantidadeRegistros=50 -> 200 (rate-limit restante=94)
+2026-09-11T13:26:33.627Z [wake] GET /tabelaPrecos/74/produtos?pagina=27&quantidadeRegistros=50 -> 200 (rate-limit restante=93)
+2026-09-11T13:26:35.629Z [wake] GET /tabelaPrecos/74/produtos?pagina=28&quantidadeRegistros=50 -> 200 (rate-limit restante=92)
+2026-09-11T13:26:37.630Z [wake] GET /tabelaPrecos/74/produtos?pagina=29&quantidadeRegistros=50 -> 200 (rate-limit restante=91)
+2026-09-11T13:26:39.633Z [wake] GET /tabelaPrecos/74/produtos?pagina=30&quantidadeRegistros=50 -> 200 (rate-limit restante=90)
+2026-09-11T13:26:41.631Z [wake] GET /tabelaPrecos/74/produtos?pagina=31&quantidadeRegistros=50 -> 200 (rate-limit restante=119)
+2026-09-11T13:26:43.631Z [wake] GET /tabelaPrecos/74/produtos?pagina=32&quantidadeRegistros=50 -> 200 (rate-limit restante=118)
+2026-09-11T13:26:45.634Z [wake] GET /tabelaPrecos/74/produtos?pagina=33&quantidadeRegistros=50 -> 200 (rate-limit restante=117)
+2026-09-11T13:26:47.648Z [wake] GET /tabelaPrecos/74/produtos?pagina=34&quantidadeRegistros=50 -> 200 (rate-limit restante=116)
+2026-09-11T13:26:49.633Z [wake] GET /tabelaPrecos/74/produtos?pagina=35&quantidadeRegistros=50 -> 200 (rate-limit restante=115)
+2026-09-11T13:26:51.639Z [wake] GET /tabelaPrecos/74/produtos?pagina=36&quantidadeRegistros=50 -> 200 (rate-limit restante=114)
+2026-09-11T13:26:53.637Z [wake] GET /tabelaPrecos/74/produtos?pagina=37&quantidadeRegistros=50 -> 200 (rate-limit restante=113)
+2026-09-11T13:26:55.647Z [wake] GET /tabelaPrecos/74/produtos?pagina=38&quantidadeRegistros=50 -> 200 (rate-limit restante=112)
+2026-09-11T13:26:57.682Z [wake] GET /tabelaPrecos/74/produtos?pagina=39&quantidadeRegistros=50 -> 200 (rate-limit restante=111)
+2026-09-11T13:26:59.655Z [wake] GET /tabelaPrecos/74/produtos?pagina=40&quantidadeRegistros=50 -> 200 (rate-limit restante=110)
+2026-09-11T13:27:01.646Z [wake] GET /tabelaPrecos/74/produtos?pagina=41&quantidadeRegistros=50 -> 200 (rate-limit restante=109)
+2026-09-11T13:27:03.674Z [wake] GET /tabelaPrecos/74/produtos?pagina=42&quantidadeRegistros=50 -> 200 (rate-limit restante=108)
+2026-09-11T13:27:05.652Z [wake] GET /tabelaPrecos/74/produtos?pagina=43&quantidadeRegistros=50 -> 200 (rate-limit restante=107)
+2026-09-11T13:27:07.650Z [wake] GET /tabelaPrecos/74/produtos?pagina=44&quantidadeRegistros=50 -> 200 (rate-limit restante=106)
+2026-09-11T13:27:09.671Z [wake] GET /tabelaPrecos/74/produtos?pagina=45&quantidadeRegistros=50 -> 200 (rate-limit restante=105)
+2026-09-11T13:27:11.652Z [wake] GET /tabelaPrecos/74/produtos?pagina=46&quantidadeRegistros=50 -> 200 (rate-limit restante=104)
+2026-09-11T13:27:13.668Z [wake] GET /tabelaPrecos/74/produtos?pagina=47&quantidadeRegistros=50 -> 200 (rate-limit restante=103)
+2026-09-11T13:27:15.692Z [wake] GET /promocoes/10365 -> 200 (rate-limit restante=119)
+2026-09-11T13:27:15.697Z [ciss] precos de 2318 produtos
+2026-09-11T13:27:18.152Z [ciss] precos: 150/2318
+2026-09-11T13:27:18.753Z [ciss] precos: 300/2318
+2026-09-11T13:27:19.524Z [ciss] precos: 450/2318
+2026-09-11T13:27:20.317Z [ciss] precos: 600/2318
+2026-09-11T13:27:21.443Z [ciss] precos: 750/2318
+2026-09-11T13:27:22.325Z [ciss] precos: 900/2318
+2026-09-11T13:27:22.995Z [ciss] precos: 1050/2318
+2026-09-11T13:27:23.658Z [ciss] precos: 1200/2318
+2026-09-11T13:27:24.233Z [ciss] precos: 1350/2318
+2026-09-11T13:27:24.834Z [ciss] precos: 1500/2318
+2026-09-11T13:27:25.412Z [ciss] precos: 1650/2318
+2026-09-11T13:27:26.534Z [ciss] precos: 1800/2318
+2026-09-11T13:27:27.202Z [ciss] precos: 1950/2318
+2026-09-11T13:27:27.785Z [ciss] precos: 2100/2318
+2026-09-11T13:27:28.418Z [ciss] precos: 2250/2318
+2026-09-11T13:27:28.890Z [ciss] precos: 2318/2318
+2026-09-11T13:27:28.890Z [ciss] estoque de 2318 produtos (empresa 2, local 2)
+2026-09-11T13:28:39.644Z [ciss] estoque: 200/2318
+2026-09-11T13:29:32.045Z [ciss] estoque: 400/2318
+2026-09-11T13:30:05.862Z [ciss] estoque: 600/2318
+2026-09-11T13:30:59.932Z [ciss] estoque: 800/2318
+2026-09-11T13:32:02.808Z [ciss] estoque: 1000/2318
+2026-09-11T13:33:00.815Z [ciss] estoque: 1200/2318
+2026-09-11T13:33:36.355Z [ciss] estoque: 1400/2318
+2026-09-11T13:34:10.388Z [ciss] estoque: 1600/2318
+2026-09-11T13:34:55.940Z [ciss] estoque: 1800/2318
+2026-09-11T13:36:15.802Z [ciss] estoque: 2000/2318
+2026-09-11T13:37:17.864Z [ciss] estoque: 2200/2318
+2026-09-11T13:37:42.201Z [out] /tmp/reconcile-20260911-1021/out/reconciliation-20260911-1037.json
+2026-09-11T13:37:42.201Z [out] /tmp/reconcile-20260911-1021/out/reconciliation-20260911-1037.csv
+2026-09-11T13:37:42.201Z [resumo] {"whitelist_total":2318,"ciss_found":2315,"ciss_missing":3,"ciss_no_stock_record":3,"wake_found":2318,"wake_missing":0,"unit_cento":0,"unit_pc":16,"unit_un":0,"unit_kg":1,"unit_unsupported":2298,"unit_missing":0,"unit_raw_distribution":{"CT":2298,"PC":16,"KG":1},"price_matches":0,"price_mismatches":16,"stock_matches":3,"stock_mismatches":13,"stock_unverifiable":0,"price_table_matches":0,"price_table_mismatches":16,"configuration_required":1,"errors":0,"status_counts":{"MATCH":0,"PRICE_MISMATCH":3,"STOCK_MISMATCH":0,"PRICE_AND_STOCK_MISMATCH":13,"CISS_MISSING":3,"WAKE_MISSING":0,"UNSUPPORTED_UNIT":2298,"CONFIGURATION_REQUIRED":1,"ERROR":0}}
+2026-09-11T13:37:42.201Z [resumo] promocao: UNVERIFIED; wake_requests=144 ciss_requests=2334
+EXIT=0
