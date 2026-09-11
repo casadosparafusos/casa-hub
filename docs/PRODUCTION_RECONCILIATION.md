@@ -183,58 +183,50 @@ Mapear `CT → CENTO` é uma **mudança funcional na regra** e **não foi feita*
 | Tabela 74 | 2298 | 0 |
 | Estoque | 2297 | 1 |
 
-A única divergência de estoque é o SKU `6837`: CISS 1,48 CT → esperado 14; Wake 17. É compatível com movimentação de estoque entre o último sync do worker e a leitura, mas não foi investigada.
+A única divergência de estoque é de 1 produto, compatível com movimentação entre o último sync do worker e a leitura (não investigada; detalhe só no relatório privado).
 
 Ou seja: se CT for aprovado como sinônimo de CENTO, produção está coerente em 2297 de 2298 produtos.
 
 ### 2. Os 16 produtos PC estão publicados na Wake com a regra de CENTO
 
-Nos 16 casos, os números da Wake são exatamente o resultado da fórmula CENTO aplicada a um item que o CISS diz ser PC. Exemplo, SKU 270:
+Nos 16 casos, preço e estoque da Wake são exatamente o resultado da fórmula CENTO aplicada a um item que o CISS diz ser PC:
 
-- CISS: R$ 2,07, estoque 1894;
-- Wake: R$ 0,02 (= 2,07 ÷ 100 × 1,2), estoque 18.940 (= 1894 × 100 × 10%);
-- esperado para PC: R$ 2,07 e estoque 1894.
+- preço Wake = `round2(preço CISS ÷ 100 × 1,2)`, quando o esperado para PC é o preço CISS;
+- estoque Wake = `floor(estoque CISS × 100 × 10%)`, quando o esperado para PC é o estoque CISS.
 
 Isso confirma, com dados reais, o que já se sabia do código: o motor de produção aplica CENTO a tudo, sem consultar `unit`.
 
-- 3 são só PRICE_MISMATCH, porque o estoque é 0 nos dois lados: SKUs 355, 15123 e 16527.
-- 13 são PRICE_AND_STOCK_MISMATCH: 270, 503, 17894, 12983, 24339, 13064, 359, 13093, 494, 26022, 5418, 5419 e 5420.
+- 3 são só PRICE_MISMATCH (estoque 0 nos dois lados);
+- 13 são PRICE_AND_STOCK_MISMATCH.
 
-Nenhum desses produtos foi corrigido.
+A lista por SKU está só no relatório privado. Nenhum desses produtos foi corrigido.
 
 ### 3. KG — 1 produto em CONFIGURATION_REQUIRED
 
-SKU `12852`: CISS R$ 28,33/KG, estoque 2008,038 KG. A Wake publica R$ 0,34 e estoque 20.080, ou seja, também com a fórmula CENTO. Não existe `kg_por_caixa` cadastrado, e o valor não foi inventado. Nenhuma migration foi criada.
+SKU `12852`: a Wake também está com a fórmula CENTO aplicada. Não existe `kg_por_caixa` cadastrado, e o valor não foi inventado. Nenhuma migration foi criada.
 
 ### 4. CISS_MISSING — 3 produtos
 
-`GET /products/stock` responde `data: []` (sem linha de saldo) para os 3. Produção trata esse caso como estoque 0, e a Wake está com estoque 0 nos três.
-
-| SKU | Preço CISS | Wake precoPor |
-|---|---|---|
-| 1273 | 5776,02 | 69,31 |
-| 28875 | null (sem `retail_price` no CISS) | 3,40 |
-| 28899 | 369,52 | 4,43 |
-
-São os mesmos 3 já conhecidos como "CISS sem leitura". Sem `unit`, não há regra aplicável.
+SKUs `1273`, `28875` e `28899`: `GET /products/stock` responde `data: []` (sem linha de saldo). Produção trata esse caso como estoque 0, e a Wake está com estoque 0 nos três. O `28875` também vem sem `retail_price` no CISS. São os mesmos 3 já conhecidos como "CISS sem leitura". Sem `unit`, não há regra aplicável.
 
 ### 5. Tabela de preço 74
 
-`precoPor` da tabela é igual ao `precoPor` do produto nas 16 linhas comparadas, e as duas coisas divergem do esperado para PC pelo mesmo motivo do achado 2. O `precoDe` da tabela fica em ~1,3× o `precoPor` (ex.: 0,02 → 0,03). Isso foi registrado sem julgamento, conforme a regra.
+`precoPor` da tabela é igual ao `precoPor` do produto nas 16 linhas comparadas, e os dois divergem do esperado para PC pelo mesmo motivo do achado 2. O `precoDe` da tabela fica em ~1,3× o `precoPor`. Isso foi registrado sem julgamento, conforme a regra.
 
-## Arquivos para auditoria
+## Arquivos para auditoria (privados, fora do Git)
+
+Os relatórios completos têm preço e estoque CISS/Wake por SKU, então **não são versionados**. Ficam só na estação, em `artifacts-private/reconciliation-20260911/` (no `.gitignore`):
 
 | Arquivo | Tamanho | SHA-256 |
 |---|---|---|
-| [reconciliation-20260911-1037.json](reconciliation/reconciliation-20260911-1037.json) | 1.885.489 B | `0e0f9875e9cd859721abf9920cf516382109ac2e9e77bff24badc24c6e12816a` |
-| [reconciliation-20260911-1037.csv](reconciliation/reconciliation-20260911-1037.csv) | 274.665 B | `9d9cbf5506544efa50aa4c430abf50af606d3ae62af4d58e2e2f3ac899d7a930` |
-| [reconciliation-20260911-1037.plan.txt](reconciliation/reconciliation-20260911-1037.plan.txt) | 1.787 B | `a0018853713ed2d5e47f85b204207bc21e9a1abb4b1e08be86305fddec96b676` |
-| [reconciliation-20260911-1037.run.log](reconciliation/reconciliation-20260911-1037.run.log) | 26.037 B | `27f81516dcb977cbc526721be8aa2eb078437bc8f2827a11f545702366c3129c` |
+| reconciliation-20260911-1037.json | 1.885.489 B | `0e0f9875e9cd859721abf9920cf516382109ac2e9e77bff24badc24c6e12816a` |
+| reconciliation-20260911-1037.csv | 274.665 B | `9d9cbf5506544efa50aa4c430abf50af606d3ae62af4d58e2e2f3ac899d7a930` |
+| reconciliation-20260911-1037.plan.txt | 1.787 B | `a0018853713ed2d5e47f85b204207bc21e9a1abb4b1e08be86305fddec96b676` |
+| reconciliation-20260911-1037.run.log | 26.037 B | `27f81516dcb977cbc526721be8aa2eb078437bc8f2827a11f545702366c3129c` |
 
-- Cópias locais em `docs/reconciliation/`, pasta versionada porque `artifacts/` está no `.gitignore`.
-- Os originais continuam no servidor em `/tmp/reconcile-20260911-1021/` (`out/`, `plan.txt`, `run.log`); nada foi apagado.
-- Os arquivos foram varridos contra segredos antes de gravar (no próprio script) e de novo após a cópia (grep por `authorization`, `bearer`, `basic`, `SETTINGS_SECRET`, `password`, `senha`, `cookie`): 0 ocorrências.
-- O JSON tem o `raw` completo da promoção.
+- Os originais continuam no servidor em `/tmp/reconcile-20260911-1021/`; nada foi apagado.
+- Varridos contra segredos antes de gravar e de novo após a cópia: 0 ocorrências.
+- **Atenção:** esses arquivos chegaram a ser versionados nos commits `95204fd` e `d92f059` desta branch e foram removidos do índice em seguida. Eles **continuam no histórico** do Git; removê-los de lá exige reescrever o histórico e fazer force-push, o que é proibido sem aprovação. A mitigação combinada é tornar o repositório privado.
 
 ## Decisões pendentes (aguardando aprovação)
 

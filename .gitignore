@@ -13,3 +13,7 @@ tsconfig.tsbuildinfo
 .config/
 *.log
 artifacts/
+
+# dados comerciais por SKU -- nunca versionar
+artifacts-private/
+docs/reconciliation/

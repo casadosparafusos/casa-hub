@@ -45,7 +45,7 @@ Detalhes em [RECONCILIATION_READONLY.md](RECONCILIATION_READONLY.md).
 - Comparações (só as linhas PC): preço 0 match / 16 mismatch; estoque 3 / 13; tabela 74 0 / 16.
 - CISS_MISSING 3 (1273, 28875, 28899); CONFIGURATION_REQUIRED 1 (KG 12852).
 - Promoção 10365: `UNVERIFIED`. A Wake devolve a condição 4 (argumentos 23085 e 100) e a ação 2 (20.00), sem descritor textual nem lista de produtos.
-- Arquivos (JSON, CSV, plan, log) em `docs/reconciliation/`; os originais continuam em `/tmp/reconcile-20260911-1021/` no servidor.
+- Relatórios completos (JSON, CSV, plan, log) **só fora do Git**, em `artifacts-private/reconciliation-20260911/` na estação; os originais continuam em `/tmp/reconcile-20260911-1021/` no servidor.
 - Simulação informativa: aplicando CENTO às linhas CT, 2297 de 2298 bateriam em preço, tabela e estoque. **Não** é resultado oficial; a regra não foi alterada.
 
 ### Correção registrada (borda de ponto flutuante)
