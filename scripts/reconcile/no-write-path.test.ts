@@ -7,18 +7,20 @@ import { describe, expect, it } from 'vitest'
 
 const DIR = __dirname
 const CLI = path.join(DIR, '..', 'reconcile-readonly.ts')
+const CENSUS_CLI = path.join(DIR, '..', 'ciss-unit-census.ts')
 const sources = [
   ...fs
     .readdirSync(DIR)
     .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
     .map((f) => path.join(DIR, f)),
   CLI,
+  CENSUS_CLI,
 ].map((file) => ({ file: path.relative(path.join(DIR, '..'), file).replace(/\\/g, '/'), text: fs.readFileSync(file, 'utf8') }))
 
 describe('reconciliador sem write path', () => {
   it('encontrou os fontes esperados', () => {
     const names = sources.map((s) => s.file)
-    for (const f of ['reconcile/http.ts', 'reconcile/wake-reader.ts', 'reconcile/ciss-reader.ts', 'reconcile/db-readonly.ts', 'reconcile-readonly.ts']) {
+    for (const f of ['reconcile/http.ts', 'reconcile/wake-reader.ts', 'reconcile/ciss-reader.ts', 'reconcile/db-readonly.ts', 'reconcile-readonly.ts', 'reconcile/unit-census.ts', 'ciss-unit-census.ts']) {
       expect(names).toContain(f)
     }
   })

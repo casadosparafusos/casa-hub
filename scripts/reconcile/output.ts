@@ -61,6 +61,35 @@ export function assertNoSecrets(text: string, secrets: Array<string | null | und
   }
 }
 
+export const CENSUS_CSV_COLUMNS = ['product_id', 'reference', 'description', 'unit_raw', 'unit_normalized', 'in_current_whitelist'] as const
+export type CensusCsvRow = Record<(typeof CENSUS_CSV_COLUMNS)[number], string | boolean | null>
+
+/**
+ * Censo de unidades: `ciss-unit-census-<stamp>.{json,csv}`. So identidade +
+ * unit por produto (sem preco/estoque); mesma varredura de segredos e mesmo
+ * `wx` (nunca sobrescreve) do relatorio de reconciliacao.
+ */
+export function writeCensusArtifacts(
+  outDir: string,
+  stamp: string,
+  report: Record<string, unknown>,
+  rows: CensusCsvRow[],
+  secrets: Array<string | null | undefined>,
+): { jsonPath: string; csvPath: string } {
+  const json = JSON.stringify(report, null, 2)
+  const lines = [CENSUS_CSV_COLUMNS.join(',')]
+  for (const r of rows) lines.push(CENSUS_CSV_COLUMNS.map((c) => csvCell(r[c])).join(','))
+  const csv = lines.join('\n') + '\n'
+  assertNoSecrets(json, secrets)
+  assertNoSecrets(csv, secrets)
+  fs.mkdirSync(outDir, { recursive: true })
+  const jsonPath = path.join(outDir, `ciss-unit-census-${stamp}.json`)
+  const csvPath = path.join(outDir, `ciss-unit-census-${stamp}.csv`)
+  fs.writeFileSync(jsonPath, json, { encoding: 'utf8', flag: 'wx' })
+  fs.writeFileSync(csvPath, csv, { encoding: 'utf8', flag: 'wx' })
+  return { jsonPath, csvPath }
+}
+
 export function writeArtifacts(
   outDir: string,
   stamp: string,

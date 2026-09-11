@@ -17,6 +17,59 @@ export interface CliArgs {
   cissConcurrency: number
 }
 
+// Argumentos do CLI scripts/ciss-unit-census.ts.
+export interface CensusArgs {
+  root: string
+  envFile: string | null
+  db: string | null
+  out: string
+  /** Exatamente 1 GET (page=1), sem retry, sem gravar arquivo. */
+  probe: boolean
+  perPage: number
+  pageDelayMs: number
+  maxPages: number
+  timeoutMs: number
+}
+
+function intInRange(flag: string, raw: string, min: number, max: number): number {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${flag} deve ser inteiro entre ${min} e ${max} (recebido: ${raw})`)
+  return n
+}
+
+export function parseCensusArgs(argv: string[]): CensusArgs {
+  const args: CensusArgs = {
+    root: process.cwd(),
+    envFile: null,
+    db: null,
+    out: path.resolve('artifacts'),
+    probe: false,
+    perPage: 500,
+    pageDelayMs: 1000,
+    maxPages: 400,
+    timeoutMs: 60_000,
+  }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    const next = () => {
+      const v = argv[++i]
+      if (v === undefined) throw new Error(`faltou valor para ${a}`)
+      return v
+    }
+    if (a === '--root') args.root = path.resolve(next())
+    else if (a === '--env-file') args.envFile = path.resolve(next())
+    else if (a === '--db') args.db = path.resolve(next())
+    else if (a === '--out') args.out = path.resolve(next())
+    else if (a === '--probe') args.probe = true
+    else if (a === '--per-page') args.perPage = intInRange(a, next(), 1, 500)
+    else if (a === '--page-delay-ms') args.pageDelayMs = intInRange(a, next(), 250, 60_000)
+    else if (a === '--max-pages') args.maxPages = intInRange(a, next(), 1, 2000)
+    else if (a === '--timeout-ms') args.timeoutMs = intInRange(a, next(), 1000, 300_000)
+    else throw new Error(`argumento desconhecido: ${a}`)
+  }
+  return args
+}
+
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     root: process.cwd(),
