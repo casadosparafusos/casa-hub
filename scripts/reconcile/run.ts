@@ -12,6 +12,7 @@ import {
 } from './rules'
 import {
   analyzePromotion,
+  PRODUCTS_EXTRA_FIELDS,
   WakeAbortError,
   WakeHttpError,
   WakeReader,
@@ -101,6 +102,11 @@ export async function runReconciliation(cfg: RunConfig): Promise<ReconciliationR
       const { products, ...meta } = scan
       scanMeta = meta
       if (scan.nonAscendingIds) warnings.push('Wake devolveu produtoVarianteId fora de ordem crescente -- WAKE_MISSING pode estar superestimado')
+      if (!scan.stockVerifiable) {
+        warnings.push(`ESTOQUE WAKE NAO VERIFICAVEL: ${scan.stockUnverifiableReason ?? 'motivo desconhecido'} -- linhas viram ERROR, nunca STOCK_MISMATCH`)
+      } else if (scan.stockFieldMissing > 0) {
+        warnings.push(`${scan.stockFieldMissing} produto(s) de GET /produtos sem o campo estoque[] -- essas linhas viram ERROR (estoque nao verificavel)`)
+      }
       if (scan.stopReason === 'max_pages') throw new WakeAbortError('limite de paginas de /produtos atingido')
       wakeProducts = new Map()
       for (const snap of products) {
@@ -125,7 +131,11 @@ export async function runReconciliation(cfg: RunConfig): Promise<ReconciliationR
       if (cfg.promotionId !== null) {
         try {
           const dados = await wakeReader.readPromotion(cfg.promotionId)
-          promotionCheck = analyzePromotion(cfg.promotionId, dados, now(), promoExpected)
+          const scope = cfg.products.map((p) => {
+            const vid = Number(p.wakeVariantId)
+            return { sku: p.wakeSku, variantId: Number.isInteger(vid) ? vid : null }
+          })
+          promotionCheck = analyzePromotion(cfg.promotionId, dados, now(), promoExpected, scope)
         } catch (err) {
           if (err instanceof WakeHttpError) promotionCheck = promotionError(cfg.promotionId, err.message, promoExpected)
           else throw err
@@ -198,6 +208,10 @@ export async function runReconciliation(cfg: RunConfig): Promise<ReconciliationR
       wake_requests: wakeReader?.requestCount ?? 0,
       wake_price_table_pages: tablePages,
       ciss_requests: cissReader?.requestCount ?? 0,
+      wake_stock_verifiable: scanMeta?.stockVerifiable ?? null,
+      wake_stock_unverifiable_reason: scanMeta?.stockUnverifiableReason ?? null,
+      wake_stock_field_present: scanMeta?.stockFieldPresent ?? null,
+      wake_stock_field_missing: scanMeta?.stockFieldMissing ?? null,
       config: {
         wake_cd_id: cfg.wakeCdId,
         wake_price_table_id: cfg.priceTableId,
@@ -205,6 +219,8 @@ export async function runReconciliation(cfg: RunConfig): Promise<ReconciliationR
         ciss_stock_enterprise: cfg.cissEnterprise,
         ciss_stock_location: cfg.cissLocation,
         variant_range_scan: cfg.useVariantRange,
+        wake_products_extra_fields: PRODUCTS_EXTRA_FIELDS,
+        ciss_stock_concurrency: cissReader?.concurrencyLimit ?? null,
       },
       rules: {
         cento_units: CENTO_UNITS,
@@ -236,9 +252,12 @@ function promotionError(id: number, error: string, expected: { min_qty: number; 
     data_termino: null,
     vigente: null,
     quantity_condition_value: null,
+    action_ids: [],
+    action_descriptors: [],
     action_numeric_values: [],
+    scope: { source: null, listed_count: null, whitelist_count: 0, covered: null, missing_sample: [] },
     expected,
-    checks: { ativo: null, vigente: null, quantidade: null, percentual: null },
+    checks: { ativo: null, vigente: null, quantidade: null, acao: null, escopo: null },
     notes: [],
     error,
     raw: null,

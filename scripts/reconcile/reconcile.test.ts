@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CissStockOutcome, CissStockRecord } from './ciss-reader'
 import type { ManagedProductRow } from './db-readonly'
 import { reconcileAll, reconcileProduct, type ReconcileInput } from './reconcile'
-import type { WakePriceTableEntry, WakeProductSnapshot } from './wake-reader'
+import type { WakePriceTableEntry, WakeProductSnapshot, WakeStockReadStatus } from './wake-reader'
 
 function product(id: string, variant = `9${id}`, sku = `SKU${id}`): ManagedProductRow {
   return { id: Number(id), cissProductId: id, wakeVariantId: variant, wakeSku: sku }
@@ -24,8 +24,13 @@ function stock(id: string, unitRaw: string | null, quantity: number, found = tru
   return { ok: true, record }
 }
 
-function wake(p: ManagedProductRow, precoPor: number | null, stockCd: number | null): WakeProductSnapshot {
-  return { variantId: Number(p.wakeVariantId), sku: p.wakeSku, precoDe: null, precoPor, stockCd, reservedCd: 0, valido: true, exibirSite: true }
+function wake(
+  p: ManagedProductRow,
+  precoPor: number | null,
+  stockCd: number | null,
+  stockStatus: WakeStockReadStatus = stockCd === null ? 'no_cd_entry' : 'ok',
+): WakeProductSnapshot {
+  return { variantId: Number(p.wakeVariantId), sku: p.wakeSku, precoDe: null, precoPor, stockCd, stockStatus, reservedCd: 0, valido: true, exibirSite: true }
 }
 
 function table(p: ManagedProductRow, precoPor: number): WakePriceTableEntry {
@@ -220,6 +225,32 @@ describe('reconcileProduct', () => {
     expect(r.price_table_match).toBe(false)
   })
 
+  it('estoque Wake sem o campo estoque[] (no_field) = ERROR explicito, nunca STOCK_MISMATCH', () => {
+    const input = withCento(0.3, null)
+    input.wakeProducts!.set(p.wakeSku, wake(p, 0.3, null, 'no_field'))
+    const r = reconcileProduct(p, input)
+    expect(r.status).toBe('ERROR')
+    expect(r.stock_match).toBeNull()
+    expect(r.price_match).toBe(true) // preco continua reconciliado
+    expect(r.expected_stock).toBe(366)
+    expect(r.error).toContain('estoque Wake nao verificavel (no_field)')
+  })
+
+  it('estoque[] sem entrada do CD (no_cd_entry) = ERROR, nunca STOCK_MISMATCH', () => {
+    const r = reconcileProduct(p, withCento(25, null))
+    expect(r.status).toBe('ERROR')
+    expect(r.stock_match).toBeNull()
+    expect(r.price_match).toBe(false)
+    expect(r.error).toContain('estoque Wake nao verificavel (no_cd_entry)')
+    expect(r.error).toContain('preco DIVERGE')
+  })
+
+  it('estoqueFisico invalido (invalid_value) = ERROR', () => {
+    const input = withCento(0.3, null)
+    input.wakeProducts!.set(p.wakeSku, wake(p, 0.3, null, 'invalid_value'))
+    expect(reconcileProduct(p, input)).toMatchObject({ status: 'ERROR', stock_match: null })
+  })
+
   it('variant id divergente e anotado', () => {
     const input = withCento(0.3, 366)
     input.wakeProducts!.set(p.wakeSku, { ...wake(p, 0.3, 366), variantId: 1 })
@@ -272,6 +303,24 @@ describe('reconcileAll / agregados', () => {
     })
     expect(aggregates.unit_raw_distribution).toEqual({ CENTO: 1, PC: 1, KG: 1, XYZ: 1 })
     expect(aggregates.status_counts.MATCH).toBe(1)
+  })
+
+  it('formato de estoque indisponivel em massa: zero STOCK_MISMATCH, tudo stock_unverifiable', () => {
+    const ps = ['1', '2', '3'].map((id) => product(id))
+    const input = baseInput(ps)
+    for (const x of ps) {
+      input.cissPrices!.set(x.cissProductId, 25)
+      input.cissStock!.set(x.cissProductId, stock(x.cissProductId, 'CENTO', 10))
+      input.wakeProducts!.set(x.wakeSku, wake(x, 0.3, null, 'no_field'))
+      input.wakeTable!.set(x.wakeSku, table(x, 0.3))
+    }
+    const { rows, aggregates } = reconcileAll(input)
+    expect(rows.every((r) => r.status === 'ERROR')).toBe(true)
+    expect(aggregates.stock_mismatches).toBe(0)
+    expect(aggregates.stock_matches).toBe(0)
+    expect(aggregates.stock_unverifiable).toBe(3)
+    expect(aggregates.status_counts.STOCK_MISMATCH).toBe(0)
+    expect(aggregates.price_matches).toBe(3)
   })
 
   it('Wake incompleta: wake_found/wake_missing nao sao contados', () => {

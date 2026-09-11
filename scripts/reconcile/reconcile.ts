@@ -81,6 +81,8 @@ export interface Aggregates {
   price_mismatches: number
   stock_matches: number
   stock_mismatches: number
+  /** Linhas em que o estoque Wake nao pode ser lido (campo/CD/valor ausente) -- nunca contadas como mismatch. */
+  stock_unverifiable: number
   price_table_matches: number
   price_table_mismatches: number
   configuration_required: number
@@ -208,12 +210,21 @@ export function reconcileProduct(p: ManagedProductRow, input: ReconcileInput): R
     if (!te) notes.push('SKU ausente na tabela de preco')
   }
 
-  if (wp.stockCd === null) {
-    row.stock_match = false
-    notes.push('produto sem entrada do CD configurado em estoque[]')
-  } else {
-    row.stock_match = wp.stockCd === expected.expectedStock
+  // Fail-safe: estoque Wake so e comparado quando foi lido de fato. Campo
+  // ausente / sem entrada do CD / valor invalido NAO vira STOCK_MISMATCH --
+  // vira ERROR explicito (price_match continua preenchido para auditoria).
+  if (wp.stockStatus !== 'ok' || wp.stockCd === null) {
+    row.stock_match = null
+    const why =
+      wp.stockStatus === 'no_field'
+        ? 'resposta de GET /produtos sem o campo estoque[]'
+        : wp.stockStatus === 'no_cd_entry'
+          ? 'estoque[] sem entrada do CD configurado'
+          : 'estoqueFisico do CD nao numerico'
+    const pricePart = `preco ${row.price_match ? 'confere' : 'DIVERGE'}${row.price_table_match === false ? ' (tabela DIVERGE)' : ''}`
+    return finish(row, 'ERROR', [`estoque Wake nao verificavel (${wp.stockStatus}): ${why}; ${pricePart}`, ...notes])
   }
+  row.stock_match = wp.stockCd === expected.expectedStock
 
   const priceOk = row.price_match && row.price_table_match !== false
   const stockOk = row.stock_match
@@ -246,6 +257,7 @@ export function aggregate(rows: ReconciliationRow[], input: Pick<ReconcileInput,
     price_mismatches: 0,
     stock_matches: 0,
     stock_mismatches: 0,
+    stock_unverifiable: 0,
     price_table_matches: 0,
     price_table_mismatches: 0,
     configuration_required: 0,
@@ -287,6 +299,7 @@ export function aggregate(rows: ReconciliationRow[], input: Pick<ReconcileInput,
     else if (r.price_match === false) agg.price_mismatches++
     if (r.stock_match === true) agg.stock_matches++
     else if (r.stock_match === false) agg.stock_mismatches++
+    if (r.error?.startsWith('estoque Wake nao verificavel')) agg.stock_unverifiable++
     if (r.price_table_match === true) agg.price_table_matches++
     else if (r.price_table_match === false) agg.price_table_mismatches++
   }

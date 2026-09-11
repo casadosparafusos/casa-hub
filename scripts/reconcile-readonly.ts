@@ -8,7 +8,7 @@
  *
  * Uso:
  *   tsx scripts/reconcile-readonly.ts --root <app> [--env-file <.env>] [--db <app.db>]
- *       [--out <dir>] [--full-scan] [--plan]
+ *       [--out <dir>] [--full-scan] [--plan] [--ciss-concurrency <n>]
  *
  *   --root       diretorio da aplicacao (node_modules/better-sqlite3). Default: cwd.
  *   --env-file   carrega KEY=VALUE sem sobrescrever o env ja definido (nada e impresso).
@@ -16,45 +16,19 @@
  *   --out        diretorio dos artefatos. Default: ./artifacts.
  *   --full-scan  varre /produtos inteiro em vez do intervalo de produtoVarianteId da whitelist.
  *   --plan       so le o SQLite e imprime o plano/estimativa -- nenhuma chamada de rede.
+ *   --ciss-concurrency  GETs de estoque CISS simultaneos. Default 1 (a auditoria roda
+ *                com o worker de producao ligado; nao somar pressao ao SIGAS). Maximo 4.
  *
  * Saida: 0 = concluido; 2 = concluido com leitura abortada (artefatos parciais gravados); 1 = falha.
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { parseArgs } from './reconcile/cli-args'
 import { readDbSnapshot, settingValue } from './reconcile/db-readonly'
 import type { FetchLike } from './reconcile/http'
 import { timestampForFile, writeArtifacts } from './reconcile/output'
 import { runReconciliation, variantRange } from './reconcile/run'
 import { resolveSecret } from './reconcile/secrets'
-
-interface CliArgs {
-  root: string
-  envFile: string | null
-  db: string | null
-  out: string
-  fullScan: boolean
-  plan: boolean
-}
-
-function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { root: process.cwd(), envFile: null, db: null, out: path.resolve('artifacts'), fullScan: false, plan: false }
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    const next = () => {
-      const v = argv[++i]
-      if (v === undefined) throw new Error(`faltou valor para ${a}`)
-      return v
-    }
-    if (a === '--root') args.root = path.resolve(next())
-    else if (a === '--env-file') args.envFile = path.resolve(next())
-    else if (a === '--db') args.db = path.resolve(next())
-    else if (a === '--out') args.out = path.resolve(next())
-    else if (a === '--full-scan') args.fullScan = true
-    else if (a === '--plan') args.plan = true
-    else throw new Error(`argumento desconhecido: ${a}`)
-  }
-  return args
-}
 
 /** Parser minimo de .env (KEY=VALUE, aspas opcionais). Nao sobrescreve o env existente. */
 export function loadEnvFile(file: string, env: NodeJS.ProcessEnv): number {
@@ -97,6 +71,8 @@ async function main(): Promise<number> {
   const promotionId = intSetting(s('WAKE_PROMOTION_ID'))
   const cissEnterprise = intSetting(s('CISS_STOCK_ENTERPRISE')) ?? 2
   const cissLocation = intSetting(s('CISS_STOCK_LOCATION')) ?? 5
+  const cissEnterpriseSource = intSetting(s('CISS_STOCK_ENTERPRISE')) === null ? 'default' : 'settings/env'
+  const cissLocationSource = intSetting(s('CISS_STOCK_LOCATION')) === null ? 'default' : 'settings/env'
   const observed = {
     UNIT_PRICE_MARKUP_PERCENT: s('UNIT_PRICE_MARKUP_PERCENT'),
     STOCK_PERCENT: s('STOCK_PERCENT'),
@@ -132,7 +108,19 @@ async function main(): Promise<number> {
     const tablePages = Math.ceil(n / 50) + 1
     log(`[plan] Wake GET /produtos: ${productPages} paginas; GET /tabelaPrecos/${priceTableId}/produtos: ~${tablePages} paginas (se a tabela tiver so a whitelist); GET /promocoes/${promotionId}: 1`)
     log(`[plan] Wake: 1 request a cada 2s (30 req/min) -- tempo ~ total de requests / 30 minutos`)
-    log(`[plan] CISS: ${Math.ceil(n / 150)} requests de preco + ${n} de estoque (concorrencia 3)`)
+    log(`[plan] CISS: ${Math.ceil(n / 150)} requests de preco + ${n} de estoque (concorrencia ${args.cissConcurrency}${args.cissConcurrency === 1 ? ', sequencial' : ''})`)
+    log('[plan] ---- confirmacao ----')
+    log(`[plan] produtos ativos (whitelist)  = ${n}`)
+    log(`[plan] Wake CD                      = ${wakeCdId}`)
+    log(`[plan] Wake tabela de preco         = ${priceTableId}`)
+    log(`[plan] Wake promocao                = ${promotionId}`)
+    log(`[plan] CISS empresa                 = ${cissEnterprise} (${cissEnterpriseSource})`)
+    log(`[plan] CISS local                   = ${cissLocation} (${cissLocationSource})`)
+    log(`[plan] full-scan                    = ${args.fullScan}`)
+    log(`[plan] GET /produtos camposAdicionais = Estoque`)
+    log(`[plan] CISS stock concurrency       = ${args.cissConcurrency}`)
+    log(`[plan] Wake teto                    = 30 req/min; aborta no 1o 429/401/403`)
+    log(`[plan] saida                        = ${args.out}`)
     log('[plan] nenhuma chamada de rede feita (--plan)')
     return 0
   }
@@ -155,6 +143,7 @@ async function main(): Promise<number> {
     cissFetch: fetchImpl,
     ...(env.CISS_BASE_URL ? { cissBaseUrl: env.CISS_BASE_URL } : {}),
     useVariantRange: !args.fullScan,
+    cissOptions: { concurrency: args.cissConcurrency },
     log,
     extraMeta: {
       settings_observed: observed,

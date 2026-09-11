@@ -97,7 +97,7 @@ function config(wakeMethods: string[], cissMethods: string[], wakeOpts: { produt
 }
 
 describe('runReconciliation', () => {
-  it('fluxo completo com mocks: so GET, statuses por UNIT, promocao PASS', async () => {
+  it('fluxo completo com mocks: so GET, statuses por UNIT, promocao sem acao/escopo provados = UNVERIFIED', async () => {
     const wm: string[] = []
     const cm: string[] = []
     const report = await runReconciliation(config(wm, cm))
@@ -106,8 +106,13 @@ describe('runReconciliation', () => {
       ['B', 'PRICE_AND_STOCK_MISMATCH'], // PC com a Wake no formato CENTO
       ['C', 'CONFIGURATION_REQUIRED'], // KG sem kg_por_caixa
     ])
-    expect(report.promotion_check?.status).toBe('PASS')
+    // o mock so traz o argumento numerico 20 (sem descritor nem lista de produtos): nao prova acao/escopo
+    expect(report.promotion_check?.status).toBe('UNVERIFIED')
+    expect(report.promotion_check?.raw).toBeTruthy()
     expect(report.meta.aborted).toBe(false)
+    expect(report.meta.wake_stock_verifiable).toBe(true)
+    expect((report.meta.config as Record<string, unknown>).ciss_stock_concurrency).toBe(1)
+    expect((report.meta.config as Record<string, unknown>).wake_products_extra_fields).toBe('Estoque')
     expect(report.meta.mode).toBe('READ_ONLY')
     expect(new Set([...wm, ...cm])).toEqual(new Set(['GET']))
     expect(report.meta.wake_requests).toBe(3)
@@ -127,6 +132,46 @@ describe('runReconciliation', () => {
     expect(report.aggregates.unit_cento).toBe(1)
     expect(report.aggregates.wake_missing).toBe(0)
     expect(cm.length).toBeGreaterThan(0)
+  })
+
+  it('Wake sem estoque[] em /produtos: warning explicito, zero STOCK_MISMATCH, preco ainda reconciliado', async () => {
+    const base = config([], [])
+    const inner = base.wakeFetch
+    const semEstoque: FetchLike = async (url, init) => {
+      const res = await inner(url, init)
+      if (new URL(url).pathname !== '/produtos') return res
+      const body = (await res.json()) as Array<Record<string, unknown>>
+      return json(
+        body.map(({ estoque: _e, ...rest }) => rest),
+        200,
+        { 'x-tem-proxima-pagina': 'false', 'x-ultimo-produto-variante-id': '5002' },
+      )
+    }
+    const report = await runReconciliation({ ...base, wakeFetch: semEstoque })
+    expect(report.meta.wake_stock_verifiable).toBe(false)
+    expect((report.meta.warnings as string[]).some((w) => w.includes('ESTOQUE WAKE NAO VERIFICAVEL'))).toBe(true)
+    expect(report.aggregates.stock_mismatches).toBe(0)
+    expect(report.aggregates.status_counts.STOCK_MISMATCH).toBe(0)
+    expect(report.aggregates.stock_unverifiable).toBe(2)
+    expect(report.rows.find((r) => r.wake_sku === 'A')).toMatchObject({ status: 'ERROR', price_match: true, stock_match: null })
+  })
+
+  it('CISS: default de concorrencia = 1 (nunca mais de 1 GET de estoque em voo)', async () => {
+    let inFlight = 0
+    let maxInFlight = 0
+    const base = cissFetch([])
+    const counting: FetchLike = async (url, init) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((r) => setTimeout(r, 5))
+      try {
+        return await base(url, init)
+      } finally {
+        inFlight--
+      }
+    }
+    await runReconciliation({ ...config([], []), cissFetch: counting })
+    expect(maxInFlight).toBe(1)
   })
 
   it('relatorio e CSV nunca contem os tokens', async () => {

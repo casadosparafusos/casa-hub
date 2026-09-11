@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FetchLike } from './http'
-import { analyzePromotion, WakeAbortError, WakeHttpError, WakeReader } from './wake-reader'
+import { analyzePromotion, toProductSnapshot, WakeAbortError, WakeHttpError, WakeReader } from './wake-reader'
 
 interface Call {
   url: URL
@@ -85,12 +85,15 @@ describe('WakeReader.scanProducts', () => {
       expect(c.url.searchParams.get('pagina')).toBeNull()
       expect(c.url.searchParams.get('quantidadeRegistros')).toBe('50')
       expect(c.url.searchParams.get('centrosDistribuicao')).toBe('25')
+      // estoque explicito em TODA pagina
+      expect(c.url.searchParams.get('camposAdicionais')).toBe('Estoque')
       expect(c.auth).toBe('BASIC tok-secreto-123')
       // token nunca na URL
       expect(c.url.toString()).not.toContain('tok-secreto-123')
     }
     // estoque do CD pedido (25), nao do primeiro da lista
-    expect(scan.products[0]).toMatchObject({ variantId: 1, sku: 'SKU1', stockCd: 1, precoPor: 1 })
+    expect(scan.products[0]).toMatchObject({ variantId: 1, sku: 'SKU1', stockCd: 1, stockStatus: 'ok', precoPor: 1 })
+    expect(scan).toMatchObject({ stockVerifiable: true, stockFieldPresent: 120, stockFieldMissing: 0, stockUnverifiableReason: null })
     // throttle: >= 2s entre requests (teto de 30 req/min)
     expect(clock.sleeps.filter((ms) => ms >= 2000)).toHaveLength(2)
   })
@@ -103,8 +106,21 @@ describe('WakeReader.scanProducts', () => {
     const reader = new WakeReader({ token: 't', fetchImpl, ...fakeClock() })
     const scan = await reader.scanProducts(25, { minVariantId: 1001, maxVariantId: 1080 })
     expect(calls.map((c) => c.url.searchParams.get('produtoVarianteIdDe'))).toEqual(['1000', '1050'])
+    expect(calls.map((c) => c.url.searchParams.get('camposAdicionais'))).toEqual(['Estoque', 'Estoque'])
     expect(scan.stopReason).toBe('passed_whitelist_max')
     expect(scan.products).toHaveLength(100)
+  })
+
+  it('fail-safe: resposta sem estoque[] em nenhum produto = estoque NAO verificavel (erro explicito)', async () => {
+    const page = productPage(1, 3).map(({ estoque: _e, ...rest }) => rest)
+    const { fetchImpl } = mockFetch(() => ({ status: 200, body: page, headers: { 'x-tem-proxima-pagina': 'false', 'x-ultimo-produto-variante-id': '3' } }))
+    const logs: string[] = []
+    const scan = await new WakeReader({ token: 't', fetchImpl, ...fakeClock(), log: (m) => logs.push(m) }).scanProducts(25)
+    expect(scan.stockVerifiable).toBe(false)
+    expect(scan.stockFieldMissing).toBe(3)
+    expect(scan.stockUnverifiableReason).toContain('nao verificavel')
+    expect(scan.products.every((x) => x.stockStatus === 'no_field' && x.stockCd === null)).toBe(true)
+    expect(logs.some((l) => l.includes('[wake] ERRO:'))).toBe(true)
   })
 
   it('para em pagina vazia', async () => {
@@ -166,6 +182,15 @@ describe('WakeReader.scanProducts', () => {
   })
 })
 
+describe('toProductSnapshot (status da leitura de estoque)', () => {
+  it('ok / no_field / no_cd_entry / invalid_value', () => {
+    expect(toProductSnapshot({ sku: 'A', estoque: [{ centroDistribuicaoId: 25, estoqueFisico: 0 }] }, 25)).toMatchObject({ stockStatus: 'ok', stockCd: 0 })
+    expect(toProductSnapshot({ sku: 'A' }, 25)).toMatchObject({ stockStatus: 'no_field', stockCd: null })
+    expect(toProductSnapshot({ sku: 'A', estoque: [{ centroDistribuicaoId: 1, estoqueFisico: 9 }] }, 25)).toMatchObject({ stockStatus: 'no_cd_entry', stockCd: null })
+    expect(toProductSnapshot({ sku: 'A', estoque: [{ centroDistribuicaoId: 25, estoqueFisico: null }] }, 25)).toMatchObject({ stockStatus: 'invalid_value', stockCd: null })
+  })
+})
+
 describe('WakeReader.readPriceTable', () => {
   it('pagina com `pagina` ate pagina incompleta', async () => {
     const { fetchImpl, calls } = mockFetch((u) => {
@@ -180,31 +205,78 @@ describe('WakeReader.readPriceTable', () => {
   })
 })
 
-describe('analyzePromotion', () => {
+describe('analyzePromotion (estrito)', () => {
   const now = new Date('2026-09-10T12:00:00Z')
   const expected = { min_qty: 100, percent: 20 }
+  const whitelist = [
+    { sku: 'A', variantId: 5001 },
+    { sku: 'B', variantId: 5002 },
+  ]
+  // Formato "minimo": sem descritor de acao nem lista explicita de produtos.
   const dados = {
     estrutura: { nome: 'Atacado 100+', ativo: true, dataInicio: '2026-01-01T00:00:00', dataTermino: null },
     condicoes: [{ promocaoCondicaoId: 22, argumentos: [{ nrOrdem: 1, valor: '100' }] }],
     acoes: [{ promocaoAcaoId: 3, argumentos: [{ nrOrdem: 1, valor: '20' }] }],
   }
+  // Formato em que acao e escopo sao provaveis pela estrutura.
+  const acaoProvada = { promocaoAcaoId: 3, nome: 'Desconto percentual', argumentos: [{ nrOrdem: 1, valor: '20' }], produtos: [{ sku: 'A' }, { produtoVarianteId: 5002 }] }
+  const provado = { ...dados, acoes: [acaoProvada] }
 
-  it('PASS quando ativa, vigente, quantidade 100 e 20%', () => {
-    expect(analyzePromotion(10365, dados, now, expected)).toMatchObject({ status: 'PASS', quantity_condition_value: 100, vigente: true })
+  it('argumento numerico "20" sozinho NAO da PASS: UNVERIFIED, raw preservado', () => {
+    const r = analyzePromotion(10365, dados, now, expected, whitelist)
+    expect(r.status).toBe('UNVERIFIED')
+    expect(r.checks).toEqual({ ativo: true, vigente: true, quantidade: true, acao: null, escopo: null })
+    expect(r.action_numeric_values).toEqual([20])
+    expect(r.raw).toBe(dados)
+    expect(r.notes.join(' ')).toContain('acao nao determinavel')
+    expect(r.notes.join(' ')).toContain('escopo nao determinavel')
+  })
+
+  it('PASS so quando ativo, vigente, quantidade 100, desconto percentual 20 e escopo cobrindo a whitelist', () => {
+    const r = analyzePromotion(10365, provado, now, expected, whitelist)
+    expect(r.status).toBe('PASS')
+    expect(r.checks).toEqual({ ativo: true, vigente: true, quantidade: true, acao: true, escopo: true })
+    expect(r.scope).toMatchObject({ source: 'acoes[0].produtos', whitelist_count: 2, covered: 2, missing_sample: [] })
+  })
+
+  it('escopo explicito que nao cobre a whitelist = FAIL', () => {
+    const r = analyzePromotion(10365, provado, now, expected, [...whitelist, { sku: 'Z', variantId: 9 }])
+    expect(r.status).toBe('FAIL')
+    expect(r.checks.escopo).toBe(false)
+    expect(r.scope.missing_sample).toEqual(['Z'])
+  })
+
+  it('desconto percentual com outro valor = FAIL na acao', () => {
+    const d = { ...provado, acoes: [{ ...acaoProvada, argumentos: [{ valor: '15' }] }] }
+    const r = analyzePromotion(10365, d, now, expected, whitelist)
+    expect(r.status).toBe('FAIL')
+    expect(r.checks.acao).toBe(false)
+  })
+
+  it('descritor que nao e percentual (desconto em valor) com 20 = acao nao provada', () => {
+    const d = { ...provado, acoes: [{ ...acaoProvada, nome: 'Desconto em valor' }] }
+    const r = analyzePromotion(10365, d, now, expected, whitelist)
+    expect(r.checks.acao).toBeNull()
+    expect(r.status).toBe('UNVERIFIED')
   })
 
   it('FAIL quando a quantidade difere', () => {
-    const d = { ...dados, condicoes: [{ promocaoCondicaoId: 22, argumentos: [{ valor: 50 }] }] }
-    expect(analyzePromotion(10365, d, now, expected)).toMatchObject({ status: 'FAIL', checks: { quantidade: false } })
+    const d = { ...provado, condicoes: [{ promocaoCondicaoId: 22, argumentos: [{ valor: 50 }] }] }
+    expect(analyzePromotion(10365, d, now, expected, whitelist)).toMatchObject({ status: 'FAIL', checks: { quantidade: false } })
   })
 
   it('UNVERIFIED quando a condicao 22 nao existe', () => {
-    const d = { ...dados, condicoes: [] }
-    expect(analyzePromotion(10365, d, now, expected).status).toBe('UNVERIFIED')
+    const d = { ...provado, condicoes: [] }
+    expect(analyzePromotion(10365, d, now, expected, whitelist).status).toBe('UNVERIFIED')
   })
 
   it('FAIL quando inativa', () => {
-    const d = { ...dados, estrutura: { ...dados.estrutura, ativo: false } }
-    expect(analyzePromotion(10365, d, now, expected).status).toBe('FAIL')
+    const d = { ...provado, estrutura: { ...provado.estrutura, ativo: false } }
+    expect(analyzePromotion(10365, d, now, expected, whitelist).status).toBe('FAIL')
+  })
+
+  it('FAIL quando fora da vigencia', () => {
+    const d = { ...provado, estrutura: { ...provado.estrutura, dataTermino: '2026-02-01T00:00:00' } }
+    expect(analyzePromotion(10365, d, now, expected, whitelist)).toMatchObject({ status: 'FAIL', checks: { vigente: false } })
   })
 })

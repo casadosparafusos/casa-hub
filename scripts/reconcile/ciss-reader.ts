@@ -76,6 +76,9 @@ export class CissReader {
   private readonly baseUrl: string
   private readonly timeoutMs: number
   private readonly concurrency: number
+  get concurrencyLimit(): number {
+    return this.concurrency
+  }
   private readonly maxAttempts: number
   private readonly retryDelayMs: number
   private readonly sleepFn: (ms: number) => Promise<void>
@@ -84,7 +87,8 @@ export class CissReader {
   constructor(private readonly opts: CissReaderOptions) {
     this.baseUrl = opts.baseUrl ?? CISS_DEFAULT_BASE_URL
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    this.concurrency = opts.concurrency ?? 3
+    // Default 1: a auditoria roda com o worker de producao ligado; nao somar pressao ao SIGAS.
+    this.concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1))
     this.maxAttempts = opts.maxAttempts ?? 2
     this.retryDelayMs = opts.retryDelayMs ?? RETRY_DELAY_MS
     this.sleepFn = opts.sleepFn ?? sleep

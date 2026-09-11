@@ -66,6 +66,29 @@ describe('CissReader', () => {
     expect(out.get('2')?.ok).toBe(true)
   })
 
+  it('concorrencia default = 1; valor maior e respeitado como teto', async () => {
+    const run = async (concurrency?: number) => {
+      let inFlight = 0
+      let max = 0
+      const fetchImpl: FetchLike = async (url) => {
+        inFlight++
+        max = Math.max(max, inFlight)
+        await new Promise((r) => setTimeout(r, 5))
+        inFlight--
+        const id = new URL(url).searchParams.get('product_id')
+        return new Response(JSON.stringify({ data: [{ product_id: Number(id), unit: 'UN', companies: [] }] }), { status: 200 })
+      }
+      const reader = new CissReader({ ...opts, fetchImpl, ...(concurrency ? { concurrency } : {}) })
+      const out = await reader.readStockMany(['1', '2', '3', '4', '5', '6'], { enterprise: 2, location: 2 })
+      return { max, limit: reader.concurrencyLimit, n: out.size }
+    }
+    expect(await run()).toEqual({ max: 1, limit: 1, n: 6 })
+    const three = await run(3)
+    expect(three.limit).toBe(3)
+    expect(three.max).toBeLessThanOrEqual(3)
+    expect(three.n).toBe(6)
+  })
+
   it('precos em lotes de 150, product_id ausente fica fora do Map, null preservado', async () => {
     const { fetchImpl, urls } = mock((u) => {
       const ids = (u.searchParams.get('product_ids') ?? '').split(',')

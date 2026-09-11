@@ -51,13 +51,24 @@ export interface WakeReaderOptions {
   log?: (msg: string) => void
 }
 
+/**
+ * Como o estoque do CD foi lido na resposta de /produtos:
+ *   ok            -> `estoque[]` presente, entrada do CD com estoqueFisico numerico;
+ *   no_field      -> resposta sem `estoque[]` (formato nao disponivel -- NAO verificavel);
+ *   no_cd_entry   -> `estoque[]` presente, mas sem entrada do CD pedido;
+ *   invalid_value -> entrada do CD presente com estoqueFisico nao numerico.
+ * So `ok` pode gerar STOCK_MATCH/STOCK_MISMATCH; o resto vira erro explicito.
+ */
+export type WakeStockReadStatus = 'ok' | 'no_field' | 'no_cd_entry' | 'invalid_value'
+
 export interface WakeProductSnapshot {
   variantId: number | null
   sku: string
   precoDe: number | null
   precoPor: number | null
-  /** estoqueFisico da entrada do CD pedido; null = produto sem entrada desse CD. */
+  /** estoqueFisico da entrada do CD pedido; null quando stockStatus != 'ok'. */
   stockCd: number | null
+  stockStatus: WakeStockReadStatus
   reservedCd: number | null
   valido: boolean | null
   exibirSite: boolean | null
@@ -105,7 +116,20 @@ export interface ProductScan {
   stopReason: 'empty_page' | 'no_next_page' | 'passed_whitelist_max' | 'max_pages'
   totalCountHeader: number | null
   nonAscendingIds: boolean
+  /** Quantos produtos vieram com / sem o campo `estoque[]` (camposAdicionais=Estoque). */
+  stockFieldPresent: number
+  stockFieldMissing: number
+  /**
+   * false = a resposta nao trouxe `estoque[]` em NENHUM produto (formato
+   * necessario indisponivel). O estoque Wake inteiro vira "nao verificavel",
+   * nunca STOCK_MISMATCH em massa.
+   */
+  stockVerifiable: boolean
+  stockUnverifiableReason: string | null
 }
+
+/** Parametro obrigatorio para a Wake devolver `estoque[]` em GET /produtos. */
+export const PRODUCTS_EXTRA_FIELDS = 'Estoque'
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -216,14 +240,37 @@ export class WakeReader {
     let totalCountHeader: number | null = null
     let nonAscendingIds = false
     let prevId = Number.NEGATIVE_INFINITY
+    let stockFieldPresent = 0
+    let stockFieldMissing = 0
+    const result = (stopReason: ProductScan['stopReason']): ProductScan => {
+      const stockVerifiable = stockFieldPresent > 0
+      const stockUnverifiableReason = stockVerifiable
+        ? null
+        : products.length === 0
+          ? 'nenhum produto lido em GET /produtos'
+          : `GET /produtos (camposAdicionais=${PRODUCTS_EXTRA_FIELDS}) nao trouxe o campo estoque[] em nenhum dos ${products.length} produtos -- estoque Wake nao verificavel`
+      if (!stockVerifiable) this.log(`[wake] ERRO: ${stockUnverifiableReason}`)
+      return {
+        products,
+        pages,
+        startCursor,
+        lastCursor: cursor,
+        stopReason,
+        totalCountHeader,
+        nonAscendingIds,
+        stockFieldPresent,
+        stockFieldMissing,
+        stockVerifiable,
+        stockUnverifiableReason,
+      }
+    }
 
     for (;;) {
-      if (pages >= this.maxPages) {
-        return { products, pages, startCursor, lastCursor: cursor, stopReason: 'max_pages', totalCountHeader, nonAscendingIds }
-      }
+      if (pages >= this.maxPages) return result('max_pages')
       const { json, headers } = await this.get('/produtos', {
         centrosDistribuicao: cdId,
         quantidadeRegistros: WAKE_PAGE_SIZE,
+        camposAdicionais: PRODUCTS_EXTRA_FIELDS,
         produtoVarianteIdDe: cursor ?? undefined,
       })
       pages++
@@ -232,13 +279,13 @@ export class WakeReader {
         const tc = Number(headers.get('x-total-count'))
         totalCountHeader = Number.isFinite(tc) && headers.get('x-total-count') !== null ? tc : null
       }
-      if (json.length === 0) {
-        return { products, pages, startCursor, lastCursor: cursor, stopReason: 'empty_page', totalCountHeader, nonAscendingIds }
-      }
+      if (json.length === 0) return result('empty_page')
 
       let pageMaxId = Number.NEGATIVE_INFINITY
       for (const raw of json as RawProduct[]) {
         const snap = toProductSnapshot(raw, cdId)
+        if (snap.stockStatus === 'no_field') stockFieldMissing++
+        else stockFieldPresent++
         if (snap.variantId !== null) {
           if (snap.variantId < prevId) nonAscendingIds = true
           prevId = snap.variantId
@@ -253,14 +300,10 @@ export class WakeReader {
       if (cursor !== null && next <= cursor) throw new WakeAbortError(`cursor da Wake nao avancou (${cursor} -> ${next})`)
       cursor = next
 
-      if (range && next >= range.maxVariantId) {
-        return { products, pages, startCursor, lastCursor: cursor, stopReason: 'passed_whitelist_max', totalCountHeader, nonAscendingIds }
-      }
+      if (range && next >= range.maxVariantId) return result('passed_whitelist_max')
       const hasNextHeader = headers.get('x-tem-proxima-pagina')
       const hasNext = hasNextHeader !== null ? hasNextHeader.trim().toLowerCase() === 'true' : json.length >= WAKE_PAGE_SIZE
-      if (!hasNext) {
-        return { products, pages, startCursor, lastCursor: cursor, stopReason: 'no_next_page', totalCountHeader, nonAscendingIds }
-      }
+      if (!hasNext) return result('no_next_page')
     }
   }
 
@@ -297,28 +340,42 @@ export class WakeReader {
 }
 
 export function toProductSnapshot(raw: RawProduct, cdId: number): WakeProductSnapshot {
-  const entry = Array.isArray(raw.estoque) ? raw.estoque.find((e) => e && e.centroDistribuicaoId === cdId) : undefined
+  const hasField = Array.isArray(raw.estoque)
+  const entry = hasField ? raw.estoque?.find((e) => e && e.centroDistribuicaoId === cdId) : undefined
+  const stockCd = entry ? num(entry.estoqueFisico) : null
+  const stockStatus: WakeStockReadStatus = !hasField ? 'no_field' : !entry ? 'no_cd_entry' : stockCd === null ? 'invalid_value' : 'ok'
   return {
     variantId: num(raw.produtoVarianteId),
     sku: typeof raw.sku === 'string' ? raw.sku.trim() : '',
     precoDe: num(raw.precoDe),
     precoPor: num(raw.precoPor),
-    stockCd: entry ? num(entry.estoqueFisico) : null,
+    stockCd,
+    stockStatus,
     reservedCd: entry ? num(entry.estoqueReservado) : null,
     valido: typeof raw.valido === 'boolean' ? raw.valido : null,
     exibirSite: typeof raw.exibirSite === 'boolean' ? raw.exibirSite : null,
   }
 }
 
+
 // ---------------------------------------------------------------------------
-// Promocao -- interpretacao conservadora. A doc da Wake identifica a
-// condicao de quantidade minima pelo promocaoCondicaoId 22; o percentual vem
-// como argumento numerico das acoes. Se algo nao for determinavel, o status
-// e UNVERIFIED (nunca PASS por suposicao) e o JSON cru vai no relatorio pra
-// conferencia humana. Nada aqui "corrige" a politica comercial.
+// Promocao -- interpretacao ESTRITA. PASS so quando a estrutura retornada
+// PROVA os 5 pontos: ativo, vigente, condicao de quantidade (id 22) = 100,
+// acao = desconto percentual de 20 e escopo cobrindo a whitelist. Um
+// argumento numerico "20" solto NAO prova a acao (pode ser qualquer coisa);
+// promocaoAcaoId sozinho tambem nao (semantica nao documentada no repo).
+// O que nao for determinavel com seguranca vira null -> UNVERIFIED, com o
+// JSON cru no relatorio para conferencia humana. Nada aqui "corrige" a
+// politica comercial, e o resultado nao bloqueia a reconciliacao de preco e
+// estoque.
 // ---------------------------------------------------------------------------
 
 export const QUANTITY_CONDITION_ID = 22
+
+/** Campos textuais que, se existirem na acao, podem descrever o tipo dela. */
+const ACTION_TEXT_KEYS = ['nome', 'descricao', 'tipo', 'tipoAcao', 'acao', 'descricaoAcao'] as const
+/** Chaves que, se existirem como array, sao lista explicita de produtos. */
+const SCOPE_LIST_KEYS = /^(produtos|produtosVariantes|produtoVariantes|variantes|skus)$/i
 
 interface PromoArg {
   nrOrdem?: number
@@ -329,7 +386,11 @@ interface PromoItem {
   promocaoCondicaoId?: number
   promocaoAcaoId?: number
   argumentos?: PromoArg[]
+  [k: string]: unknown
 }
+
+/** Produtos da whitelist que a promocao deveria cobrir. */
+export type PromotionScopeInput = Array<{ sku: string; variantId: number | null }>
 
 export interface PromotionCheck {
   promotion_id: number
@@ -340,9 +401,18 @@ export interface PromotionCheck {
   data_termino: string | null
   vigente: boolean | null
   quantity_condition_value: number | null
+  action_ids: number[]
+  action_descriptors: string[]
   action_numeric_values: number[]
+  scope: {
+    source: string | null
+    listed_count: number | null
+    whitelist_count: number
+    covered: number | null
+    missing_sample: string[]
+  }
   expected: { min_qty: number; percent: number }
-  checks: { ativo: boolean | null; vigente: boolean | null; quantidade: boolean | null; percentual: boolean | null }
+  checks: { ativo: boolean | null; vigente: boolean | null; quantidade: boolean | null; acao: boolean | null; escopo: boolean | null }
   notes: string[]
   error: string | null
   raw: unknown
@@ -357,11 +427,41 @@ function numericArg(v: unknown): number | null {
   return null
 }
 
+function actionDescriptor(a: PromoItem): string | null {
+  const parts = ACTION_TEXT_KEYS.map((k) => a[k]).filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+  return parts.length > 0 ? parts.join(' | ') : null
+}
+
+function isPercentDiscount(desc: string): boolean {
+  return /desconto/i.test(desc) && /(percent|%)/i.test(desc)
+}
+
+/** Procura listas explicitas de produtos nas propriedades diretas de um objeto. */
+function collectScopeLists(obj: unknown, where: string, out: { source: string; skus: Set<string>; ids: Set<number> }[]): void {
+  if (!obj || typeof obj !== 'object') return
+  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    if (!SCOPE_LIST_KEYS.test(key) || !Array.isArray(value)) continue
+    const skus = new Set<string>()
+    const ids = new Set<number>()
+    for (const el of value) {
+      if (typeof el === 'string' && el.trim() !== '') skus.add(el.trim())
+      else if (typeof el === 'number' && Number.isInteger(el)) ids.add(el)
+      else if (el && typeof el === 'object') {
+        const r = el as { sku?: unknown; produtoVarianteId?: unknown }
+        if (typeof r.sku === 'string' && r.sku.trim() !== '') skus.add(r.sku.trim())
+        if (typeof r.produtoVarianteId === 'number' && Number.isInteger(r.produtoVarianteId)) ids.add(r.produtoVarianteId)
+      }
+    }
+    if (skus.size > 0 || ids.size > 0) out.push({ source: `${where}.${key}`, skus, ids })
+  }
+}
+
 export function analyzePromotion(
   promotionId: number,
   dados: unknown,
   now: Date,
   expected: { min_qty: number; percent: number },
+  scopeInput: PromotionScopeInput = [],
 ): PromotionCheck {
   const notes: string[] = []
   const d = (dados && typeof dados === 'object' ? dados : {}) as {
@@ -373,6 +473,7 @@ export function analyzePromotion(
   const condicoes = Array.isArray(d.condicoes) ? d.condicoes : []
   const acoes = Array.isArray(d.acoes) ? d.acoes : []
 
+  // ativo / vigente
   const ativo = typeof est.ativo === 'boolean' ? est.ativo : null
   const inicio = est.dataInicio ? Date.parse(est.dataInicio) : NaN
   const termino = est.dataTermino ? Date.parse(est.dataTermino) : NaN
@@ -383,6 +484,7 @@ export function analyzePromotion(
     notes.push('dataInicio ausente/ilegivel -- vigencia nao determinada')
   }
 
+  // condicao de quantidade (id 22, documentado)
   const qtyCond = condicoes.find((c) => c.promocaoCondicaoId === QUANTITY_CONDITION_ID)
   let quantity: number | null = null
   if (qtyCond) {
@@ -393,23 +495,79 @@ export function analyzePromotion(
         break
       }
     }
+    if (quantity === null) notes.push(`condicao ${QUANTITY_CONDITION_ID} sem argumento numerico`)
   } else {
     notes.push(`condicao ${QUANTITY_CONDITION_ID} (quantidade) nao encontrada -- conferir raw.condicoes`)
   }
 
+  // acao: so provada com descritor textual de desconto percentual + valor.
+  const actionIds: number[] = []
+  const actionDescriptors: string[] = []
   const actionValues: number[] = []
-  for (const a of acoes) for (const arg of a.argumentos ?? []) {
-    const n = numericArg(arg.valor)
-    if (n !== null) actionValues.push(n)
+  let acao: boolean | null = null
+  let percentActionWithOtherValue = false
+  for (const a of acoes) {
+    if (typeof a.promocaoAcaoId === 'number') actionIds.push(a.promocaoAcaoId)
+    const nums: number[] = []
+    for (const arg of a.argumentos ?? []) {
+      const n = numericArg(arg.valor)
+      if (n !== null) nums.push(n)
+    }
+    actionValues.push(...nums)
+    const desc = actionDescriptor(a)
+    if (desc) actionDescriptors.push(desc)
+    if (desc && isPercentDiscount(desc)) {
+      if (nums.includes(expected.percent)) acao = true
+      else if (nums.length > 0) percentActionWithOtherValue = true
+    }
   }
-  if (acoes.length === 0) notes.push('promocao sem acoes -- percentual nao determinado')
-  notes.push('escopo (produtos/categorias) vem nos argumentos das acoes/condicoes -- conferir raw')
+  if (acao !== true && percentActionWithOtherValue) acao = false
+  if (acoes.length === 0) {
+    notes.push('promocao sem acoes -- acao nao determinada')
+  } else if (acao === null) {
+    notes.push(
+      `acao nao determinavel pela estrutura retornada: sem descritor textual de "desconto percentual" ` +
+        `(promocaoAcaoId=[${actionIds.join(',')}], argumentos numericos=[${actionValues.join(',')}]) -- UNVERIFIED; conferir raw.acoes`,
+    )
+  } else if (acao === false) {
+    notes.push(`acao de desconto percentual encontrada, mas sem o valor ${expected.percent}`)
+  }
+
+  // escopo: so provado por lista explicita de produtos cobrindo a whitelist.
+  const lists: { source: string; skus: Set<string>; ids: Set<number> }[] = []
+  collectScopeLists(est, 'estrutura', lists)
+  condicoes.forEach((c, i) => collectScopeLists(c, `condicoes[${i}]`, lists))
+  acoes.forEach((a, i) => collectScopeLists(a, `acoes[${i}]`, lists))
+  const whitelistCount = scopeInput.length
+  const scope: PromotionCheck['scope'] = { source: null, listed_count: null, whitelist_count: whitelistCount, covered: null, missing_sample: [] }
+  let escopo: boolean | null = null
+  if (lists.length === 0) {
+    notes.push('escopo nao determinavel pela estrutura retornada (nenhuma lista explicita de produtos/SKUs) -- UNVERIFIED; conferir raw')
+  } else if (whitelistCount === 0) {
+    notes.push('whitelist vazia -- escopo nao comparavel')
+  } else {
+    const skus = new Set<string>()
+    const ids = new Set<number>()
+    for (const l of lists) {
+      l.skus.forEach((s) => skus.add(s))
+      l.ids.forEach((n) => ids.add(n))
+    }
+    const missing = scopeInput.filter((p) => !skus.has(p.sku) && !(p.variantId !== null && ids.has(p.variantId))).map((p) => p.sku)
+    const n = scopeInput.length
+    scope.source = lists.map((l) => l.source).join(', ')
+    scope.listed_count = skus.size + ids.size
+    scope.covered = n - missing.length
+    scope.missing_sample = missing.slice(0, 20)
+    escopo = missing.length === 0
+    if (!escopo) notes.push(`escopo explicito nao cobre ${missing.length} de ${n} produtos da whitelist`)
+  }
 
   const checks = {
     ativo: ativo === null ? null : ativo === true,
     vigente,
     quantidade: quantity === null ? null : quantity === expected.min_qty,
-    percentual: actionValues.length === 0 ? null : actionValues.includes(expected.percent),
+    acao,
+    escopo,
   }
   const values = Object.values(checks)
   const status: PromotionCheck['status'] = values.some((v) => v === false) ? 'FAIL' : values.some((v) => v === null) ? 'UNVERIFIED' : 'PASS'
@@ -423,7 +581,10 @@ export function analyzePromotion(
     data_termino: est.dataTermino ?? null,
     vigente,
     quantity_condition_value: quantity,
+    action_ids: actionIds,
+    action_descriptors: actionDescriptors,
     action_numeric_values: actionValues,
+    scope,
     expected,
     checks,
     notes,
