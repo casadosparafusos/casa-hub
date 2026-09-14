@@ -1,0 +1,99 @@
+import { describe, expect, it } from 'vitest'
+import { computeUnit } from './compute'
+
+describe('computeUnit -- caso real PC (controle dry-run)', () => {
+  it('price=2.07, stock=1894 -> price=2.07, stock=1894 (DIRECT, 1:1)', () => {
+    const r = computeUnit({ unitRaw: 'PC', cissPrice: 2.07, cissStock: 1894 })
+    expect(r).toMatchObject({ ok: true, unitClass: 'DIRECT', policy: 'NONE', salePrice: 2.07, saleStock: 1894 })
+  })
+})
+
+describe('computeUnit -- CT (HUNDRED + FIXADOR_CENTO)', () => {
+  it('reproduz preco/estoque combinando strategy + politica', () => {
+    const r = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3 })
+    expect(r).toMatchObject({
+      ok: true,
+      unitClass: 'HUNDRED',
+      policy: 'FIXADOR_CENTO',
+      salePrice: 3.6,
+      wholesalePrice: 2.88,
+      wholesaleMinQty: 100,
+      physicalUnits: 230,
+      saleStock: 23,
+    })
+  })
+})
+
+describe('computeUnit -- KG/MT sem configuracao', () => {
+  it('KG sem packageConfig -> CONFIGURATION_REQUIRED, zero write', () => {
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340 })
+    expect(r).toEqual({
+      ok: false,
+      unitRaw: 'KG',
+      unitNormalized: 'KG',
+      reason: 'CONFIGURATION_REQUIRED',
+      detail: expect.stringContaining('quantity_per_sale_unit'),
+    })
+  })
+
+  it('MT sem packageConfig -> CONFIGURATION_REQUIRED, zero write', () => {
+    const r = computeUnit({ unitRaw: 'MT', cissPrice: 10, cissStock: 50 })
+    expect(r.ok).toBe(false)
+    if (r.ok) throw new Error('unreachable')
+    expect(r.reason).toBe('CONFIGURATION_REQUIRED')
+  })
+
+  it('KG com packageConfig valido -> ok', () => {
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageConfig: { quantityPerSaleUnit: 18 } })
+    expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', policy: 'NONE', salePrice: 180, saleStock: 18, remainder: 16 })
+  })
+})
+
+describe('computeUnit -- UNIT desconhecida', () => {
+  it('nunca escreve -- UNSUPPORTED_UNIT', () => {
+    const r = computeUnit({ unitRaw: 'ZZ', cissPrice: 10, cissStock: 5 })
+    expect(r).toEqual({ ok: false, unitRaw: 'ZZ', unitNormalized: 'ZZ', reason: 'UNSUPPORTED_UNIT' })
+  })
+
+  it('UNIT ausente -- UNSUPPORTED_UNIT', () => {
+    const r = computeUnit({ unitRaw: null, cissPrice: 10, cissStock: 5 })
+    expect(r).toEqual({ ok: false, unitRaw: null, unitNormalized: null, reason: 'UNSUPPORTED_UNIT' })
+  })
+})
+
+describe('computeUnit -- seguranca de estoque negativo', () => {
+  it('DIRECT com estoque negativo nunca resulta em saleStock negativo', () => {
+    const r = computeUnit({ unitRaw: 'PC', cissPrice: 10, cissStock: -50 })
+    expect(r).toMatchObject({ ok: true, saleStock: 0 })
+  })
+
+  it('HUNDRED com estoque negativo nunca resulta em saleStock negativo', () => {
+    const r = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: -1 })
+    expect(r).toMatchObject({ ok: true, saleStock: 0, physicalUnits: 0 })
+  })
+
+  it('PACKAGE_MEASURED com estoque negativo nunca resulta em saleStock negativo', () => {
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: -1, packageConfig: { quantityPerSaleUnit: 18 } })
+    expect(r).toMatchObject({ ok: true, saleStock: 0 })
+  })
+})
+
+describe('computeUnit -- a descricao nunca governa a UNIT', () => {
+  it('SKU descrito como "50 pecas" mas unit=PC continua DIRECT 1:1 (evidencia real: SKUs 5418/5419/5420)', () => {
+    // ComputeUnitInput nao aceita nome/descricao/categoria/SKU -- so unitRaw + preco/estoque do CISS.
+    // Isso ja e a prova estrutural: nao ha como a descricao influenciar o resultado.
+    const r = computeUnit({ unitRaw: 'PC', cissPrice: 5, cissStock: 50 })
+    expect(r).toMatchObject({ ok: true, unitClass: 'DIRECT', salePrice: 5, saleStock: 50 })
+  })
+})
+
+describe('computeUnit -- validacao de entrada numerica', () => {
+  it('preco invalido (NaN/negativo) lanca erro -- nao e fluxo de negocio', () => {
+    expect(() => computeUnit({ unitRaw: 'PC', cissPrice: Number.NaN, cissStock: 1 })).toThrow()
+    expect(() => computeUnit({ unitRaw: 'PC', cissPrice: -1, cissStock: 1 })).toThrow()
+  })
+
+  it('estoque nao finito lanca erro', () => {
+    expect(() => computeUnit({ unitRaw: 'PC', cissPrice: 1, cissStock: Number.NaN })).toThrow()
+  })
+})
