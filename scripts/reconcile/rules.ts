@@ -1,14 +1,19 @@
-// Regras de negocio esperadas por UNIT -- puras, sem I/O.
+// Regras de negocio esperadas por UNIT -- adapta a interface historica do
+// reconciliador (classifyUnit/computeExpected) ao motor puro compartilhado
+// em ./units (mesmo motor usado pelo app, ver §15 do FASE B). Nao duplica
+// mais mapa de UNIT nem formula de calculo -- so traduz o resultado do
+// motor pro formato que reconcile.ts/run.ts ja esperam.
 //
-// Fonte de verdade da unidade = campo `unit` do CISS (GET /products/stock).
-// NUNCA inferir unidade pelo nome do produto. Unidade desconhecida = fail
-// closed (UNSUPPORTED_UNIT), nunca "assumir CENTO".
-//
-// Constantes canonicas desta rodada (especificacao do Tech Lead, 10/09/2026).
-// Os settings de producao (UNIT_PRICE_MARKUP_PERCENT, STOCK_PERCENT,
-// WHOLESALE_MIN_QTY) sao lidos so para registro no meta do relatorio e
-// sinalizados se divergirem destas constantes -- nao alteram o calculo.
+// Fonte de verdade da unidade = campo `unit` do CISS. NUNCA inferir por
+// nome. Unidade desconhecida = fail closed, nunca "assume" DIRECT/CENTO.
 
+import { computeUnit, resolveUnit, type UnitClass, type UnitComputationResult } from './units'
+
+export { moneyRound, safeFloor } from './units'
+
+// Espelham scripts/reconcile/units/commercial-policy.ts (FIXADOR_CENTO) e
+// strategies.ts (HUNDRED) -- so para exibicao no meta do relatorio
+// (ver run.ts), nunca usadas no calculo (isso vem de ./units).
 export const CENTO_UNITS = 100
 export const CENTO_STOCK_PERCENT = 10
 export const CENTO_RETAIL_MULTIPLIER = 1.2
@@ -17,49 +22,24 @@ export const WHOLESALE_MIN_QTY = 100
 /** Tolerancia de comparacao de preco (meio centavo). */
 export const PRICE_TOLERANCE = 0.005
 
-export type CanonicalUnit = 'CENTO' | 'PC' | 'UN' | 'KG'
+export type CanonicalUnit = UnitClass
 
-export type UnitClassification =
-  | { kind: 'ok'; unit: CanonicalUnit }
-  | { kind: 'missing' }
-  | { kind: 'unsupported'; raw: string }
-
-const UNIT_MAP: Record<string, CanonicalUnit> = {
-  CENTO: 'CENTO',
-  PC: 'PC',
-  UN: 'UN',
-  KG: 'KG',
-}
-
-/** Mesmo arredondamento de src/lib/pricing/engine.ts (JS + EPSILON, meio-para-cima). */
-export function moneyRound(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100
-}
-
-/**
- * floor tolerante a ruido de ponto flutuante (arredonda para 9 casas antes do
- * floor). Para estoques com ate 3 casas decimais o resultado e identico a
- * formula literal de producao (verificado em rules.test.ts de 0 a 1000); a
- * protecao existe para valores fora desse padrao, que ganham floatEdgeNote.
- */
-export function safeFloor(value: number): number {
-  return Math.floor(Math.round(value * 1e9) / 1e9)
-}
+export type UnitClassification = { kind: 'ok'; unit: CanonicalUnit } | { kind: 'missing' } | { kind: 'unsupported'; raw: string }
 
 export function classifyUnit(raw: string | null | undefined): UnitClassification {
-  if (raw == null) return { kind: 'missing' }
-  const normalized = raw.trim().toUpperCase()
-  if (normalized === '') return { kind: 'missing' }
-  const unit = UNIT_MAP[normalized]
-  if (unit) return { kind: 'ok', unit }
-  return { kind: 'unsupported', raw }
+  const r = resolveUnit(raw)
+  if (!r.ok) {
+    if (r.unitNormalized == null) return { kind: 'missing' }
+    return { kind: 'unsupported', raw: r.unitRaw ?? '' }
+  }
+  return { kind: 'ok', unit: r.unitClass }
 }
 
 export interface ExpectedInput {
-  unit: CanonicalUnit
+  unitRaw: string | null | undefined
   cissPrice: number
   cissStock: number
-  /** So para KG. null/undefined = embalagem nao cadastrada. */
+  /** So para PACKAGE_MEASURED (KG/MT). null/undefined = embalagem nao cadastrada. */
   packageWeightKg?: number | null
 }
 
@@ -72,70 +52,56 @@ export type ExpectedResult =
       expectedStock: number
       /** precoPor esperado na tabela de preco (= varejo esperado). */
       priceTableExpected: number
-      /** Preenchido quando a formula literal de producao (sem safeFloor) daria outro estoque. */
+      /** Preenchido quando a formula literal de producao (sem safeFloor) daria outro estoque -- so HUNDRED. */
       floatEdgeNote?: string
     }
   | { kind: 'configuration_required'; error: string }
   | { kind: 'invalid_input'; error: string }
 
 export function computeExpected(input: ExpectedInput): ExpectedResult {
-  const { unit, cissPrice, cissStock } = input
-  if (!Number.isFinite(cissPrice) || cissPrice < 0) {
-    return { kind: 'invalid_input', error: `preco CISS invalido: ${cissPrice}` }
+  let result: UnitComputationResult
+  try {
+    result = computeUnit({
+      unitRaw: input.unitRaw,
+      cissPrice: input.cissPrice,
+      cissStock: input.cissStock,
+      packageConfig: input.packageWeightKg != null ? { quantityPerSaleUnit: input.packageWeightKg } : null,
+    })
+  } catch (err) {
+    // computeUnit lanca so pra corrupcao numerica genuina (NaN/preco negativo) --
+    // nao e fluxo de negocio, mas reconcile.ts nunca pode deixar isso derrubar a
+    // linha inteira: vira ERROR (ver reconcile.ts).
+    return { kind: 'invalid_input', error: err instanceof Error ? err.message : String(err) }
   }
-  if (!Number.isFinite(cissStock)) {
-    return { kind: 'invalid_input', error: `estoque CISS invalido: ${cissStock}` }
-  }
-  const stock = Math.max(cissStock, 0)
 
-  switch (unit) {
-    case 'CENTO': {
-      const base = cissPrice / CENTO_UNITS
-      const retail = moneyRound(base * CENTO_RETAIL_MULTIPLIER)
-      const wholesale = moneyRound(retail * WHOLESALE_MULTIPLIER)
-      const expectedStock = safeFloor(stock * CENTO_UNITS * (CENTO_STOCK_PERCENT / 100))
-      // Formula literal do motor de producao (src/lib/inventory/engine.ts).
-      const prodFormula = Math.floor(stock * CENTO_UNITS * (CENTO_STOCK_PERCENT / 100))
-      return {
-        kind: 'ok',
-        expectedRetailPrice: retail,
-        expectedWholesalePrice: wholesale,
-        expectedStock,
-        priceTableExpected: retail,
-        ...(prodFormula !== expectedStock
-          ? { floatEdgeNote: `borda de ponto flutuante: formula literal de producao daria ${prodFormula}` }
-          : {}),
-      }
+  if (!result.ok) {
+    if (result.reason === 'CONFIGURATION_REQUIRED') {
+      return { kind: 'configuration_required', error: result.detail ?? 'configuracao obrigatoria ausente' }
     }
-    case 'PC':
-    case 'UN': {
-      // Sem x100, sem /100, sem markup de fixadores.
-      const retail = moneyRound(cissPrice)
-      return {
-        kind: 'ok',
-        expectedRetailPrice: retail,
-        expectedWholesalePrice: null,
-        expectedStock: safeFloor(stock),
-        priceTableExpected: retail,
-      }
+    // UNSUPPORTED_UNIT: reconcile.ts ja filtra via classifyUnit antes de chamar
+    // computeExpected, entao isso e defensivo (nunca deve ser alcancado na pratica).
+    return { kind: 'invalid_input', error: `UNIT nao suportada: ${result.unitNormalized ?? 'ausente'}` }
+  }
+
+  // Diagnostico auditavel: compara contra a formula literal de producao do
+  // motor antigo (src/lib/inventory/engine.ts, ainda nao substituido -- §13).
+  // So se aplica a HUNDRED, unica classe onde a producao fazia essa conta.
+  let floatEdgeNote: string | undefined
+  if (result.unitClass === 'HUNDRED') {
+    const stock = Math.max(input.cissStock, 0)
+    const prodFormula = Math.floor(stock * CENTO_UNITS * (CENTO_STOCK_PERCENT / 100))
+    if (prodFormula !== result.saleStock) {
+      floatEdgeNote = `borda de ponto flutuante: formula literal de producao daria ${prodFormula}`
     }
-    case 'KG': {
-      const w = input.packageWeightKg
-      if (w == null) {
-        return { kind: 'configuration_required', error: 'UNIT=KG sem kg_por_caixa cadastrado (nao inventar valor)' }
-      }
-      if (!Number.isFinite(w) || w <= 0) {
-        return { kind: 'configuration_required', error: `UNIT=KG com kg_por_caixa invalido: ${w}` }
-      }
-      const retail = moneyRound(cissPrice * w)
-      return {
-        kind: 'ok',
-        expectedRetailPrice: retail,
-        expectedWholesalePrice: null,
-        expectedStock: safeFloor(stock / w),
-        priceTableExpected: retail,
-      }
-    }
+  }
+
+  return {
+    kind: 'ok',
+    expectedRetailPrice: result.salePrice,
+    expectedWholesalePrice: result.wholesalePrice ?? null,
+    expectedStock: result.saleStock,
+    priceTableExpected: result.salePrice,
+    ...(floatEdgeNote ? { floatEdgeNote } : {}),
   }
 }
 

@@ -14,7 +14,7 @@ const products: ManagedProductRow[] = [
 ]
 
 const CISS = {
-  '100': { unit: 'CENTO', price: 25, qty: 36.69 },
+  '100': { unit: 'CT', price: 25, qty: 36.69 },
   '200': { unit: 'PC', price: 12.5, qty: 7 },
   '300': { unit: 'KG', price: 30, qty: 10 },
 } as const
@@ -103,7 +103,7 @@ describe('runReconciliation', () => {
     const report = await runReconciliation(config(wm, cm))
     expect(report.rows.map((r) => [r.wake_sku, r.status])).toEqual([
       ['A', 'MATCH'],
-      ['B', 'PRICE_AND_STOCK_MISMATCH'], // PC com a Wake no formato CENTO
+      ['B', 'PRICE_AND_STOCK_MISMATCH'], // PC com a Wake no formato HUNDRED
       ['C', 'CONFIGURATION_REQUIRED'], // KG sem kg_por_caixa
     ])
     // o mock so traz o argumento numerico 20 (sem descritor nem lista de produtos): nao prova acao/escopo
@@ -127,9 +127,9 @@ describe('runReconciliation', () => {
     expect(report.meta.aborted).toBe(true)
     expect(report.meta.wake_abort_status).toBe(429)
     expect(report.promotion_check?.status).toBe('ERROR')
-    expect(report.rows.find((r) => r.wake_sku === 'A')).toMatchObject({ status: 'ERROR', unit: 'CENTO', expected_retail_price: 0.3 })
+    expect(report.rows.find((r) => r.wake_sku === 'A')).toMatchObject({ status: 'ERROR', unit: 'HUNDRED', expected_retail_price: 0.3 })
     expect(report.rows.find((r) => r.wake_sku === 'C')?.status).toBe('CONFIGURATION_REQUIRED')
-    expect(report.aggregates.unit_cento).toBe(1)
+    expect(report.aggregates.unit_hundred).toBe(1)
     expect(report.aggregates.wake_missing).toBe(0)
     expect(cm.length).toBeGreaterThan(0)
   })

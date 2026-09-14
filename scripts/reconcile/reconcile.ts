@@ -70,10 +70,9 @@ export interface Aggregates {
   ciss_no_stock_record: number
   wake_found: number
   wake_missing: number
-  unit_cento: number
-  unit_pc: number
-  unit_un: number
-  unit_kg: number
+  unit_hundred: number
+  unit_direct: number
+  unit_package_measured: number
   unit_unsupported: number
   unit_missing: number
   unit_raw_distribution: Record<string, number>
@@ -181,9 +180,9 @@ export function reconcileProduct(p: ManagedProductRow, input: ReconcileInput): R
   if (unit.kind === 'missing') return finish(row, 'UNSUPPORTED_UNIT', ['unit ausente no CISS', ...notes])
   if (unit.kind === 'unsupported') return finish(row, 'UNSUPPORTED_UNIT', [`unit nao suportada: "${unit.raw}"`, ...notes])
 
-  const weight = unit.unit === 'KG' ? (input.packageWeights.get(p.cissProductId) ?? null) : null
+  const weight = unit.unit === 'PACKAGE_MEASURED' ? (input.packageWeights.get(p.cissProductId) ?? null) : null
   row.package_weight_kg = weight
-  const expected = computeExpected({ unit: unit.unit, cissPrice: price, cissStock: rec.quantity, packageWeightKg: weight })
+  const expected = computeExpected({ unitRaw: rec.unitRaw, cissPrice: price, cissStock: rec.quantity, packageWeightKg: weight })
   if (expected.kind === 'configuration_required') return finish(row, 'CONFIGURATION_REQUIRED', [expected.error, ...notes])
   if (expected.kind === 'invalid_input') return finish(row, 'ERROR', [expected.error, ...notes])
 
@@ -246,10 +245,9 @@ export function aggregate(rows: ReconciliationRow[], input: Pick<ReconcileInput,
     ciss_no_stock_record: 0,
     wake_found: 0,
     wake_missing: 0,
-    unit_cento: 0,
-    unit_pc: 0,
-    unit_un: 0,
-    unit_kg: 0,
+    unit_hundred: 0,
+    unit_direct: 0,
+    unit_package_measured: 0,
     unit_unsupported: 0,
     unit_missing: 0,
     unit_raw_distribution: {},
@@ -282,10 +280,9 @@ export function aggregate(rows: ReconciliationRow[], input: Pick<ReconcileInput,
         const u = classifyUnit(outcome.record.unitRaw)
         if (u.kind === 'missing') agg.unit_missing++
         else if (u.kind === 'unsupported') agg.unit_unsupported++
-        else if (u.unit === 'CENTO') agg.unit_cento++
-        else if (u.unit === 'PC') agg.unit_pc++
-        else if (u.unit === 'UN') agg.unit_un++
-        else agg.unit_kg++
+        else if (u.unit === 'HUNDRED') agg.unit_hundred++
+        else if (u.unit === 'DIRECT') agg.unit_direct++
+        else agg.unit_package_measured++
         if (r.ciss_price !== null) agg.ciss_found++
       }
     }

@@ -1,92 +1,124 @@
 import { describe, expect, it } from 'vitest'
-import { classifyUnit, computeExpected, pricesMatch, safeFloor } from './rules'
+import { classifyUnit, computeExpected, moneyRound, pricesMatch, safeFloor } from './rules'
 
-describe('classifyUnit', () => {
-  it('normaliza caixa e espacos', () => {
-    expect(classifyUnit(' cento ')).toEqual({ kind: 'ok', unit: 'CENTO' })
-    expect(classifyUnit('PC')).toEqual({ kind: 'ok', unit: 'PC' })
-    expect(classifyUnit('un')).toEqual({ kind: 'ok', unit: 'UN' })
-    expect(classifyUnit('Kg')).toEqual({ kind: 'ok', unit: 'KG' })
+describe('classifyUnit (adapter sobre ./units)', () => {
+  it('CT -> ok HUNDRED', () => {
+    expect(classifyUnit('CT')).toEqual({ kind: 'ok', unit: 'HUNDRED' })
   })
-  it('ausente ou vazio = missing', () => {
+
+  it('" ct " -> ok HUNDRED (trim + uppercase)', () => {
+    expect(classifyUnit(' ct ')).toEqual({ kind: 'ok', unit: 'HUNDRED' })
+  })
+
+  it.each(['PC', 'UN', 'JG', 'PR', 'CJ', 'RL', 'KT', 'CX', 'LT', 'PL'])('%s -> ok DIRECT', (raw) => {
+    expect(classifyUnit(raw)).toEqual({ kind: 'ok', unit: 'DIRECT' })
+  })
+
+  it.each(['KG', 'MT'])('%s -> ok PACKAGE_MEASURED', (raw) => {
+    expect(classifyUnit(raw)).toEqual({ kind: 'ok', unit: 'PACKAGE_MEASURED' })
+  })
+
+  it('unidade desconhecida -> unsupported (fail closed, nunca DIRECT por padrao)', () => {
+    expect(classifyUnit('XYZ')).toEqual({ kind: 'unsupported', raw: 'XYZ' })
+    expect(classifyUnit('CENTO')).toEqual({ kind: 'unsupported', raw: 'CENTO' })
+    expect(classifyUnit('MILHEIRO')).toEqual({ kind: 'unsupported', raw: 'MILHEIRO' })
+  })
+
+  it('ausente/vazio -> missing', () => {
     expect(classifyUnit(null)).toEqual({ kind: 'missing' })
     expect(classifyUnit(undefined)).toEqual({ kind: 'missing' })
+    expect(classifyUnit('')).toEqual({ kind: 'missing' })
     expect(classifyUnit('   ')).toEqual({ kind: 'missing' })
-  })
-  it('desconhecida = unsupported (fail closed, nunca assume CENTO)', () => {
-    expect(classifyUnit('MILHEIRO')).toEqual({ kind: 'unsupported', raw: 'MILHEIRO' })
-    expect(classifyUnit('CX')).toEqual({ kind: 'unsupported', raw: 'CX' })
   })
 })
 
-describe('computeExpected', () => {
-  it('CENTO: preco/100 * 1.20, atacado = varejo * 0.80, estoque = floor(s*100*0.10)', () => {
-    const r = computeExpected({ unit: 'CENTO', cissPrice: 25, cissStock: 36.69 })
-    expect(r).toMatchObject({
-      kind: 'ok',
-      expectedRetailPrice: 0.3,
-      expectedWholesalePrice: 0.24,
-      expectedStock: 366,
-      priceTableExpected: 0.3,
-    })
-  })
-
-  it('CENTO: estoque negativo vira 0', () => {
-    const r = computeExpected({ unit: 'CENTO', cissPrice: 10, cissStock: -5 })
-    expect(r).toMatchObject({ kind: 'ok', expectedStock: 0 })
-  })
-
-  it('CENTO: estoque igual a formula literal de producao para todo valor com 3 casas ate 1000', () => {
-    for (let i = 0; i <= 1_000_000; i++) {
-      const s = i / 1000
-      const r = computeExpected({ unit: 'CENTO', cissPrice: 10, cissStock: s })
-      if (r.kind !== 'ok') throw new Error('esperado ok')
-      const prod = Math.floor(Math.max(s, 0) * 100 * (10 / 100))
-      if (r.expectedStock !== prod || r.floatEdgeNote) throw new Error(`divergencia em ${s}: ${r.expectedStock} vs ${prod}`)
-    }
-  })
-
-  it('PC: preco = preco CISS, sem x100, sem /100, sem markup; estoque = floor(s)', () => {
-    const r = computeExpected({ unit: 'PC', cissPrice: 12.5, cissStock: 7.9 })
-    expect(r).toEqual({ kind: 'ok', expectedRetailPrice: 12.5, expectedWholesalePrice: null, expectedStock: 7, priceTableExpected: 12.5 })
+describe('computeExpected -- DIRECT (PC/UN/...)', () => {
+  it('1:1, sem markup, sem atacado', () => {
+    const r = computeExpected({ unitRaw: 'PC', cissPrice: 2.07, cissStock: 1894 })
+    expect(r).toMatchObject({ kind: 'ok', expectedRetailPrice: 2.07, expectedWholesalePrice: null, expectedStock: 1894, priceTableExpected: 2.07 })
   })
 
   it('UN: mesma regra de PC', () => {
-    const r = computeExpected({ unit: 'UN', cissPrice: 3.99, cissStock: 40 })
-    expect(r).toEqual({ kind: 'ok', expectedRetailPrice: 3.99, expectedWholesalePrice: null, expectedStock: 40, priceTableExpected: 3.99 })
+    const r = computeExpected({ unitRaw: 'UN', cissPrice: 3.99, cissStock: 40 })
+    expect(r).toMatchObject({ kind: 'ok', expectedRetailPrice: 3.99, expectedWholesalePrice: null, expectedStock: 40, priceTableExpected: 3.99 })
   })
 
-  it('KG com embalagem: preco = preco_kg * kg_por_caixa; estoque = floor(kg / kg_por_caixa)', () => {
-    const r = computeExpected({ unit: 'KG', cissPrice: 30, cissStock: 12.5, packageWeightKg: 5 })
-    expect(r).toMatchObject({ kind: 'ok', expectedRetailPrice: 150, expectedStock: 2, expectedWholesalePrice: null })
+  it('estoque fracionario -> floor', () => {
+    const r = computeExpected({ unitRaw: 'PC', cissPrice: 10, cissStock: 5.9 })
+    expect(r).toMatchObject({ kind: 'ok', expectedStock: 5 })
   })
 
-  it('KG sem embalagem: CONFIGURATION_REQUIRED, nao inventa valor', () => {
-    const r = computeExpected({ unit: 'KG', cissPrice: 30, cissStock: 12.5 })
-    expect(r.kind).toBe('configuration_required')
-    expect(computeExpected({ unit: 'KG', cissPrice: 30, cissStock: 12.5, packageWeightKg: null }).kind).toBe('configuration_required')
-  })
-
-  it('KG com embalagem invalida: CONFIGURATION_REQUIRED', () => {
-    expect(computeExpected({ unit: 'KG', cissPrice: 30, cissStock: 1, packageWeightKg: 0 }).kind).toBe('configuration_required')
-    expect(computeExpected({ unit: 'KG', cissPrice: 30, cissStock: 1, packageWeightKg: -2 }).kind).toBe('configuration_required')
-  })
-
-  it('preco invalido = invalid_input', () => {
-    expect(computeExpected({ unit: 'PC', cissPrice: Number.NaN, cissStock: 1 }).kind).toBe('invalid_input')
-    expect(computeExpected({ unit: 'PC', cissPrice: -1, cissStock: 1 }).kind).toBe('invalid_input')
+  it('estoque negativo -> 0', () => {
+    const r = computeExpected({ unitRaw: 'PC', cissPrice: 10, cissStock: -5 })
+    expect(r).toMatchObject({ kind: 'ok', expectedStock: 0 })
   })
 })
 
-describe('safeFloor / pricesMatch', () => {
+describe('computeExpected -- HUNDRED (CT + FIXADOR_CENTO)', () => {
+  it('CISS P100=300, estoque=2.3 -> retail=3.60, wholesale=2.88, stock=23', () => {
+    const r = computeExpected({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3 })
+    expect(r).toMatchObject({ kind: 'ok', expectedRetailPrice: 3.6, expectedWholesalePrice: 2.88, expectedStock: 23, priceTableExpected: 3.6 })
+  })
+
+  it('estoque negativo vira 0 unidades fisicas -> 0 vendavel', () => {
+    const r = computeExpected({ unitRaw: 'CT', cissPrice: 10, cissStock: -5 })
+    expect(r).toMatchObject({ kind: 'ok', expectedStock: 0 })
+  })
+})
+
+describe('computeExpected -- PACKAGE_MEASURED (KG/MT)', () => {
+  it('KG sem kg_por_caixa -> configuration_required, nao inventa valor', () => {
+    const r = computeExpected({ unitRaw: 'KG', cissPrice: 10, cissStock: 340 })
+    expect(r.kind).toBe('configuration_required')
+    expect(computeExpected({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageWeightKg: null }).kind).toBe('configuration_required')
+  })
+
+  it('MT sem configuracao -> configuration_required', () => {
+    const r = computeExpected({ unitRaw: 'MT', cissPrice: 10, cissStock: 50 })
+    expect(r.kind).toBe('configuration_required')
+  })
+
+  it('KG com embalagem invalida -> configuration_required', () => {
+    expect(computeExpected({ unitRaw: 'KG', cissPrice: 30, cissStock: 1, packageWeightKg: 0 }).kind).toBe('configuration_required')
+    expect(computeExpected({ unitRaw: 'KG', cissPrice: 30, cissStock: 1, packageWeightKg: -2 }).kind).toBe('configuration_required')
+  })
+
+  it('KG com 18kg/caixa -> 340/18 = 18 caixas, preco=180', () => {
+    const r = computeExpected({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageWeightKg: 18 })
+    expect(r).toMatchObject({ kind: 'ok', expectedRetailPrice: 180, expectedStock: 18, expectedWholesalePrice: null })
+  })
+})
+
+describe('computeExpected -- entrada invalida', () => {
+  it('preco negativo/NaN -> invalid_input, nunca lanca', () => {
+    expect(computeExpected({ unitRaw: 'PC', cissPrice: Number.NaN, cissStock: 1 }).kind).toBe('invalid_input')
+    expect(computeExpected({ unitRaw: 'PC', cissPrice: -1, cissStock: 1 }).kind).toBe('invalid_input')
+  })
+})
+
+describe('safeFloor / moneyRound (re-exportados de ./units)', () => {
   it('safeFloor corrige ruido de float', () => {
     expect(safeFloor(22.999999999999996)).toBe(23)
     expect(safeFloor(22.9)).toBe(22)
   })
-  it('pricesMatch com tolerancia de meio centavo', () => {
+
+  it('moneyRound arredonda meio-para-cima em 2 casas', () => {
+    expect(moneyRound(3.005)).toBe(3.01)
+  })
+})
+
+describe('pricesMatch', () => {
+  it('dentro da tolerancia (meio centavo) -> true', () => {
     expect(pricesMatch(0.3, 0.3)).toBe(true)
     expect(pricesMatch(0.3, 0.304)).toBe(true)
+  })
+
+  it('fora da tolerancia -> false', () => {
     expect(pricesMatch(0.3, 0.31)).toBe(false)
+  })
+
+  it('null em qualquer lado -> null (nao comparavel)', () => {
     expect(pricesMatch(null, 0.3)).toBeNull()
+    expect(pricesMatch(0.3, null)).toBeNull()
   })
 })
