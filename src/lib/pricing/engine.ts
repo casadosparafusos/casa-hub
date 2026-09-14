@@ -1,69 +1,70 @@
-// Motor de preco -- puro, sem I/O, testavel isoladamente. Recebe o preco
-// bruto que o CISS/PODER devolve (P) e devolve os dois valores que a
-// integracao escreve no Wake:
-//   - unitPrice: preco por UNIDADE, com markup
-//   - specialPrice: preco "de cento" (>= WHOLESALE_MIN_QTY unidades) --
-//     entregue via Tabela de Preco + Promocao no Wake (ver
-//     docs/WAKE-API-CONTRATOS.md), nao via este motor diretamente.
+// Motor de preco -- puro, sem I/O, testavel isoladamente. Delega TODO o
+// calculo pro motor de UNIT compartilhado (src/lib/units, single-sourced em
+// scripts/reconcile/units) -- ver docs/CASA_HUB_FASE_B_UNIT_STRATEGIES.md
+// §13 ("UMA fonte pura de calculo", nao duplicar a regra aqui).
 //
-// IMPORTANTE (corrigido 08/09/2026, ver [[correcao-preco-unitario-divisao-cento]]):
-// o preco bruto que o CISS/PODER expoe hoje E O PRECO DO CENTO, nao o preco
-// unitario. Por isso:
-//   - wakeSpecialPrice = P direto (ja e o preco de cento, sem markup).
-//   - wakeUnitPrice = (P / 100) * (1 + markup%) -- tem que dividir por 100
-//     ANTES de aplicar o markup, senao o unitario sai 100x maior que devia.
+// SUBSTITUI a versao anterior (calculatePricing), que assumia TODO produto
+// como CENTO (preco bruto do CISS / 100 * markup). Essa suposicao foi
+// removida por definicao da FASE B: a UNIT real vem do campo `unit` do CISS
+// (unitRaw), nunca inferida.
 //
-// P (preco bruto do CISS) ainda nao esta disponivel via API em producao --
-// ver src/lib/ciss/price-provider.ts pro provider mock que alimenta este
-// motor ate o escopo `product_prices` ser liberado pelo SIGAS (401 hoje,
-// ver docs/WAKE-API-CONTRATOS.md).
+// wholesalePrice/wholesaleMinQty (preenchidos so pra HUNDRED, politica
+// FIXADOR_CENTO) sao campos de AUDITORIA nesta fase -- a Tabela de Preco no
+// Wake continua sendo alimentada pelo `retailPrice` (mesmo que o
+// reconciliador READ-ONLY ja faz: ver scripts/reconcile/rules.ts,
+// priceTableExpected = result.salePrice, NUNCA wholesalePrice). Nenhum
+// caminho de escrita real (src/lib/sync/engine.ts) consome wholesalePrice
+// hoje.
+import { computeUnit, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
 
-export interface PricingRules {
-  /** ex: 20 significa +20% sobre o preco bruto do ERP */
-  unitPriceMarkupPercent: number
-  /** quantidade minima (em unidades) pra valer o preco "de cento" */
-  wholesaleMinQty: number
+export interface UnitPriceInput {
+  /** Campo `unit` cru do CISS -- nunca inferir por nome/descricao/SKU. */
+  unitRaw: string | null | undefined
+  /** Preco bruto retornado pelo CISS pra este produto (na UNIT de origem, ex: preco do cento pra CT). */
+  cissPrice: number
+  /** Obrigatorio para PACKAGE_MEASURED (KG/MT); ignorado nas outras classes. */
+  packageConfig?: PackageSaleUnitConfig | null
 }
 
-export interface PricingResult {
-  /** preco de varejo bruto do ERP, sem nenhum ajuste -- so pra auditoria/diff */
-  sourceRetailPrice: number
-  /** preco unitario final no Wake, com markup aplicado e arredondado */
-  wakeUnitPrice: number
-  /** preco/cento final no Wake (igual ao preco bruto do ERP) */
-  wakeSpecialPrice: number
-  wholesaleMinQty: number
-}
+export type UnitPriceResult =
+  | {
+      ok: true
+      unitRaw: string
+      unitNormalized: string
+      unitClass: UnitClass
+      /** Preco final de varejo no Wake -- unico valor usado nos caminhos de escrita (endpoint base e Tabela de Preco). */
+      retailPrice: number
+      /** So auditoria nesta fase -- ver comentario acima. null quando a UNIT/politica nao define atacado. */
+      wholesalePrice: number | null
+      wholesaleMinQty: number | null
+    }
+  | {
+      ok: false
+      unitRaw: string | null
+      unitNormalized: string | null
+      reason: UnitResolutionFailure
+      detail?: string
+    }
 
-/**
- * Arredondamento monetario -- 2 casas decimais, meio-para-cima. Isolado
- * numa funcao propria porque arredondamento de dinheiro e um dos pontos
- * classicos de divergencia de centavos entre sistemas (ver
- * [[fonte-unica-receita-erp-fix-auditoria]] no RD Gerencial pra um caso
- * real desse tipo de discrepancia).
- */
-export function moneyRound(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100
-}
+export function calculateUnitPrice(input: UnitPriceInput): UnitPriceResult {
+  const result = computeUnit({
+    unitRaw: input.unitRaw,
+    cissPrice: input.cissPrice,
+    cissStock: 0, // preco e estoque sao matematicamente independentes no motor de UNIT -- placeholder inofensivo.
+    packageConfig: input.packageConfig ?? null,
+  })
 
-export function calculatePricing(retailPriceFromErp: number, rules: PricingRules): PricingResult {
-  if (!Number.isFinite(retailPriceFromErp) || retailPriceFromErp < 0) {
-    throw new Error(`Preco de origem invalido (ERP): ${retailPriceFromErp}`)
+  if (!result.ok) {
+    return { ok: false, unitRaw: result.unitRaw, unitNormalized: result.unitNormalized, reason: result.reason, detail: result.detail }
   }
-  if (!Number.isFinite(rules.unitPriceMarkupPercent)) {
-    throw new Error(`UNIT_PRICE_MARKUP_PERCENT invalido: ${rules.unitPriceMarkupPercent}`)
-  }
-
-  // O preco bruto do CISS/PODER e o preco DO CENTO -- divide por 100 antes
-  // de aplicar o markup pra chegar no preco por unidade.
-  const wakeUnitPrice = moneyRound((retailPriceFromErp / 100) * (1 + rules.unitPriceMarkupPercent / 100))
-  // Preco "de cento": preco bruto do ERP, sem markup, conforme especificacao.
-  const wakeSpecialPrice = moneyRound(retailPriceFromErp)
 
   return {
-    sourceRetailPrice: retailPriceFromErp,
-    wakeUnitPrice,
-    wakeSpecialPrice,
-    wholesaleMinQty: rules.wholesaleMinQty,
+    ok: true,
+    unitRaw: result.unitRaw,
+    unitNormalized: result.unitNormalized,
+    unitClass: result.unitClass,
+    retailPrice: result.salePrice,
+    wholesalePrice: result.wholesalePrice ?? null,
+    wholesaleMinQty: result.wholesaleMinQty ?? null,
   }
 }

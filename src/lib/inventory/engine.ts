@@ -1,51 +1,58 @@
-// Motor de estoque -- puro, sem I/O. Converte o estoque real do ERP (numa
-// combinacao configuravel de empresa/local do CISS) no estoque que vai pro
-// Wake, aplicando o percentual de exposicao (STOCK_PERCENT) com FLOOR
-// (nunca arredonda pra cima -- evita vender o que nao existe).
+// Motor de estoque -- puro, sem I/O, testavel isoladamente. Delega TODO o
+// calculo pro motor de UNIT compartilhado (src/lib/units, single-sourced em
+// scripts/reconcile/units) -- ver docs/CASA_HUB_FASE_B_UNIT_STRATEGIES.md
+// §13 ("UMA fonte pura de calculo", nao duplicar a regra aqui).
 //
-// IMPORTANTE (achado 08/09/2026, mesma familia do bug ja corrigido do lado
-// do preco -- ver [[correcao-preco-unitario-divisao-cento]] e
-// src/lib/pricing/engine.ts): a quantidade de estoque que o CISS devolve pra
-// este catalogo (fixadores/parafusos) e EM CENTO (pacotes de 100 unidades),
-// nao em unidades fisicas. Exemplo real relatado pelo usuario: CISS devolve
-// "2" pro produto 1563, que significa 2 CENTO = 200 parafusos fisicos, nao 2
-// parafusos. Por isso multiplica por UNITS_PER_CENTO ANTES de aplicar o
-// STOCK_PERCENT -- se aplicasse o percentual direto no valor cru do CISS, o
-// estoque exposto no Wake sairia 100x menor que o real (ex: 2 cento * 10% =
-// 0 unidades expostas, quando o correto e 200 * 10% = 20).
+// SUBSTITUI a versao anterior (calculateInventory), que multiplicava TODO
+// estoque por UNITS_PER_CENTO (100) incondicionalmente, assumindo CENTO pra
+// qualquer produto. Essa suposicao foi removida por definicao da FASE B: a
+// UNIT real vem do campo `unit` do CISS (unitRaw), nunca inferida -- PC/UN/
+// etc (DIRECT) NAO passam pela multiplicacao por 100.
+import { computeUnit, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
 
-/** CISS registra estoque deste catalogo em pacotes de cento (100 unidades). */
-const UNITS_PER_CENTO = 100
-
-export interface InventoryRules {
-  /** ex: 10 significa expor 10% do estoque real do ERP no Wake */
-  stockPercent: number
+export interface UnitStockInput {
+  /** Campo `unit` cru do CISS -- nunca inferir por nome/descricao/SKU. */
+  unitRaw: string | null | undefined
+  /** Estoque bruto retornado pelo CISS pra este produto (na UNIT de origem, ex: cento pra CT). */
+  cissStock: number
+  /** Obrigatorio para PACKAGE_MEASURED (KG/MT); ignorado nas outras classes. */
+  packageConfig?: PackageSaleUnitConfig | null
 }
 
-export interface InventoryResult {
-  /** valor cru como veio do CISS, em CENTO -- so pra auditoria/diff */
-  sourceErpStock: number
-  /** sourceErpStock convertido pra unidades fisicas (sourceErpStock * 100) */
-  sourceErpStockUnits: number
-  targetWakeStock: number
-  stockPercent: number
-}
+export type UnitStockResult =
+  | {
+      ok: true
+      unitRaw: string
+      unitNormalized: string
+      unitClass: UnitClass
+      /** Estoque final no Wake (inteiro, floor). */
+      targetWakeStock: number
+    }
+  | {
+      ok: false
+      unitRaw: string | null
+      unitNormalized: string | null
+      reason: UnitResolutionFailure
+      detail?: string
+    }
 
-export function calculateInventory(erpStock: number, rules: InventoryRules): InventoryResult {
-  if (!Number.isFinite(erpStock)) {
-    throw new Error(`Estoque de origem invalido (ERP): ${erpStock}`)
-  }
-  if (!Number.isFinite(rules.stockPercent)) {
-    throw new Error(`STOCK_PERCENT invalido: ${rules.stockPercent}`)
-  }
+export function calculateUnitStock(input: UnitStockInput): UnitStockResult {
+  const result = computeUnit({
+    unitRaw: input.unitRaw,
+    cissPrice: 0, // preco e estoque sao matematicamente independentes no motor de UNIT -- placeholder inofensivo.
+    cissStock: input.cissStock,
+    packageConfig: input.packageConfig ?? null,
+  })
 
-  const erpStockUnits = Math.max(erpStock, 0) * UNITS_PER_CENTO
-  const targetWakeStock = Math.floor(erpStockUnits * (rules.stockPercent / 100))
+  if (!result.ok) {
+    return { ok: false, unitRaw: result.unitRaw, unitNormalized: result.unitNormalized, reason: result.reason, detail: result.detail }
+  }
 
   return {
-    sourceErpStock: erpStock,
-    sourceErpStockUnits: erpStockUnits,
-    targetWakeStock,
-    stockPercent: rules.stockPercent,
+    ok: true,
+    unitRaw: result.unitRaw,
+    unitNormalized: result.unitNormalized,
+    unitClass: result.unitClass,
+    targetWakeStock: result.saleStock,
   }
 }
