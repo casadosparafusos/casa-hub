@@ -1,5 +1,17 @@
 # CHANGELOG — documentação
 
+## v6 — 14/09/2026
+
+FASE B (`feat/unit-strategies`): implementação do motor real de UNIT, sobre o mapa OWNER_CONFIRMED de 11/09/2026. Ver detalhes em `STATUS.md`.
+
+Mudanças:
+- módulo puro `scripts/reconcile/units/` (resolver, strategies, commercial-policy, compute), reexportado para o app via `src/lib/units/index.ts`;
+- `sync/engine.ts` (`syncPrices()`/`syncStock()`) delega a `calculateUnitPrice()`/`calculateUnitStock()`, com busca única de CISS estoque+unit por run;
+- UNIT observada persistida em `sync_product_state`;
+- tabela `product_sale_unit_config` criada (migration `0003_unit_strategies_schema.sql`, não aplicada em produção);
+- 8 novos testes de integração em `src/lib/sync/engine.test.ts`; 295 testes no total; typecheck e build limpos;
+- **não mergeado, não deployado**; os 16 PC mal-rotulados e o produto KG ao vivo na Wake continuam sem correção.
+
 ## v5 — 10/09/2026
 
 Consolidação completa após auditoria do repositório público.

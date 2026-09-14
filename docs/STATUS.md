@@ -1,20 +1,20 @@
 # STATUS — Casa Hub
 
-Atualizado em 11/09/2026 (consolidação do baseline canônico: FASE 0 + reconciliador + censo de UNITs + decisões OWNER_CONFIRMED, tudo numa única branch documental).
+Atualizado em 14/09/2026 (FASE B: implementação dos `UnitStrategy` em `feat/unit-strategies`, aguardando revisão do ChatGPT e autorização do usuário — não mergeado, não deployado).
 
 ## Produção
 
-- `main` = `053434c` = o que roda em `10.0.247.6:/opt/erp-wake` (porta 8083, usuário `erpwake`). **Intocado.**
+- `main` (`4ebedec`) = o que roda em `10.0.247.6:/opt/erp-wake` (porta 8083, usuário `erpwake`). **Intocado nesta fase.**
 - Todo desenvolvimento acontece local e em branches; nada é deployado sem pedido explícito.
 
 ## Branches abertas (sem merge)
 
 | Branch | Base | Estado |
 |---|---|---|
-| `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**: provider live e systemd ok; a reconciliação ao vivo foi feita pelo reconciliador (linha abaixo). Consolidada abaixo. |
-| `audit/reconciliacao-readonly` | main 053434c | Reconciliador READ-ONLY. **Executado 1× em produção em 11/09/2026 (SHA `c7616d7`)**, só leitura, sem correções. Resultado em [PRODUCTION_RECONCILIATION.md](PRODUCTION_RECONCILIATION.md). Consolidada abaixo. |
-| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS **+ decisões de negócio OWNER_CONFIRMED em 11/09/2026.** Resultado em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md). Consolidada abaixo. |
-| `docs/canonical-baseline-unit-map` | **origin/main (053434c)** | **Branch atual.** Reúne numa única base documental coerente: docs canônicos da FASE 0 (`README.md`, `CLAUDE.md`, `BUSINESS_RULES.md`, `PRICE_RULES.md`, `INVENTORY_RULES.md`, `ARCHITECTURE_TARGET.md`, `ROADMAP.md`, `UI_UX_REQUIREMENTS.md`, etc., já atualizados com o mapa OWNER_CONFIRMED) + `STATUS.md`/`CISS_UNIT_MAP.md`/reconciliação/scripts READ-ONLY das branches acima. Candidata a PR (draft) para `main`. Ainda **não implementado** nenhum `UnitStrategy`; motor de produção intocado. |
+| `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**, consolidada em `main` via FASE A/A.1. |
+| `audit/reconciliacao-readonly` | main | Reconciliador READ-ONLY. Executado 1× em produção em 11/09/2026 (SHA `c7616d7`). Consolidada em `main` via FASE A/A.1. |
+| `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS + decisões OWNER_CONFIRMED em 11/09/2026. Consolidada em `main` via FASE A/A.1. |
+| `feat/unit-strategies` | `main` (`4ebedec`) | **Branch atual (FASE B).** Implementa o motor `UnitResolver → UnitStrategy → CommercialPolicy` (mapa OWNER_CONFIRMED), integra `sync/engine.ts` (`syncPrices()`/`syncStock()`) ao motor, persiste a UNIT observada por produto, cria a tabela `product_sale_unit_config`. 295 testes (287 pré-existentes + 8 novos de integração do `sync/engine.ts`), typecheck e build limpos. **Não mergeado. Não deployado. Migration não aplicada em produção.** Os 16 produtos PC mal-rotulados e o produto KG atuais na Wake **não foram corrigidos** (fora de escopo). |
 
 ## Censo de UNITs do CISS + mapa canônico OWNER_CONFIRMED — `audit/ciss-unit-census`
 
@@ -92,12 +92,26 @@ Detalhes em [RECONCILIATION_READONLY.md](RECONCILIATION_READONLY.md).
 
 A FASE 0 afirmou que a fórmula de estoque de produção (`Math.floor(s*100*0.10)`) poderia perder 1 unidade por ruído de float (ex.: 2,3 → 22). **A afirmação estava errada.** Em JS, `2.3*100*0.1 === 23`, e uma busca exaustiva em todos os valores com até 3 casas decimais entre 0 e 1000 não encontrou nenhuma divergência. O reconciliador ainda usa um `safeFloor` defensivo e marca `floatEdgeNote` se algum valor real divergir. Nenhum valor real divergiu na execução de 11/09.
 
-## Pendências conhecidas (aguardando aprovação — nada corrigido)
+## FASE B — Unit strategies — `feat/unit-strategies` (14/09/2026)
 
-- **CT = CENTO — OWNER_CONFIRMED em 11/09/2026.** O mapa canônico em [CISS_UNIT_MAP.md](CISS_UNIT_MAP.md) já reflete a decisão. Falta implementar: motor de produção ainda ignora `unit` e aplica CENTO a tudo.
-- **9 UNITs antes sem regra (JG, PR, CJ, RL, MT, KT, CX, LT, PL) — OWNER_CONFIRMED como DIRECT** (exceto MT, que é PACKAGE_MEASURED). 1575 produtos no catálogo, 0 na whitelist hoje. Falta implementar.
+Implementação do motor real de UNIT, sobre o mapa OWNER_CONFIRMED do censo (11/09/2026). Escopo estritamente de **motor + persistência + testes**, sem deploy, sem merge, sem escrita real em Wake/CISS, sem migration em produção.
+
+- Módulo puro `scripts/reconcile/units/` (`resolver.ts`, `strategies.ts`, `commercial-policy.ts`, `compute.ts`): zero import de Wake/CISS/DB/settings/sync/filesystem/env; reexportado para o app via `src/lib/units/index.ts` (mesmo import-specifier guard do `no-write-path.test.ts`).
+- `computeUnit()`: união discriminada (`ok:true`/`ok:false`), motivo de falha `UNSUPPORTED_UNIT` ou `CONFIGURATION_REQUIRED` — nunca exceção para fluxo de negócio; corrupção numérica genuína (preço negativo/NaN, estoque não finito) continua lançando.
+- `sync/engine.ts`: `syncPrices()`/`syncStock()` delegam a `calculateUnitPrice()`/`calculateUnitStock()`; busca de estoque+unit no CISS feita **uma única vez por run**, compartilhada entre preço e estoque (mesmo em `kind='price'`, que agora também consulta `/products/stock` por causa da UNIT — consequência aceita, documentada nos testes).
+- UNIT observada persistida em `sync_product_state` (`unit_raw`, `unit_normalized`, `unit_class`, `unit_resolution_status`) — nunca mais silenciosamente descartada.
+- Tabela `product_sale_unit_config` criada (migration `0003_unit_strategies_schema.sql`) — **sem camada de CRUD/UI ainda**; hoje só populável direto no banco.
+- `FIXADOR_CENTO` (política comercial do `CT`) permanece com valores **hardcoded** (`+20%` varejo, `-20%` atacado, `10%` exposição de estoque, `wholesaleMinQty: 100`) — débito técnico pré-existente, sinalizado mas não corrigido nesta fase (`rules`/`ruleSettings` do `settings.ts` ficaram sem efeito nesse caminho).
+- Testes: 295 no total (287 pré-existentes + 8 novos de integração de `sync/engine.ts` cobrindo DIRECT/HUNDRED/PACKAGE_MEASURED com e sem config/UNSUPPORTED_UNIT, persistência em `sync_product_state`, busca única de CISS e o invariante `appliedProducts === 0` em dry-run). Typecheck e `npm run build` limpos.
+- **Nada disso corrige os 16 produtos PC mal-rotulados nem o produto KG hoje ao vivo na Wake** — motor de produção (`main`) continua na fórmula antiga até merge + deploy explícitos, autorizados separadamente.
+
+## Pendências conhecidas (aguardando aprovação)
+
+- **CT = CENTO — OWNER_CONFIRMED em 11/09/2026, motor implementado em `feat/unit-strategies`.** Falta: revisão, merge e deploy explicitamente autorizados para a produção parar de ignorar `unit`.
+- **9 UNITs antes sem regra (JG, PR, CJ, RL, MT, KT, CX, LT, PL) — OWNER_CONFIRMED como DIRECT** (exceto MT, que é PACKAGE_MEASURED) — **motor implementado**, mesma pendência de merge/deploy acima.
 - **Histórico do Git** ainda contém os relatórios por SKU da reconciliação (`95204fd`, `d92f059`). A mitigação é o repositório ficar privado; não houve force-push.
-- **16 produtos PC publicados com a fórmula CENTO na Wake** (preço ÷100 ×1,2; estoque ×100 ×10%), quando a regra OWNER_CONFIRMED é DIRECT (1:1). Confirma que o motor de produção ignora `unit`. A correção fica para `feat/unit-strategies`, fora de escopo até lá.
-- **KG sem `quantity_per_sale_unit`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Nenhuma migration criada, de propósito; a modelagem genérica `product_sale_unit_config` ainda não existe.
+- **16 produtos PC publicados com a fórmula CENTO na Wake** (preço ÷100 ×1,2; estoque ×100 ×10%), quando a regra OWNER_CONFIRMED é DIRECT (1:1). **Ainda não corrigidos** — fora de escopo até merge/deploy autorizados de `feat/unit-strategies`.
+- **KG sem `quantity_per_sale_unit`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Schema `product_sale_unit_config` já existe na branch (não aplicada em produção); falta camada de CRUD/UI para popular por produto.
 - **Promoção 10365:** falta confirmar a semântica da condição 4 / lógica 3 / `23085` e da ação 2.
 - **3 SKUs sem saldo no CISS** (1273, 28875, 28899; o 28875 também sem `retail_price`): pedir ao SIGAS.
+- **`FIXADOR_CENTO` com valores hardcoded** (markup 20%, atacado -20%, exposição 10%, `wholesaleMinQty` 100) — não configurável via settings; débito técnico pré-existente, não corrigido nesta fase.

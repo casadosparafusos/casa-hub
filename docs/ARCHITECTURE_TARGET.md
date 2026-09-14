@@ -67,7 +67,7 @@ Separar:
 - `managed_products`;
 - estado atual por produto;
 - UNIT observada;
-- `product_sale_unit_config` (genérica para KG e MT — não uma tabela por UNIT — campos: `managed_product_id, wake_sku, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by`; ainda não criada, ver `ROADMAP.md` FASE 7);
+- `product_sale_unit_config` (genérica para KG e MT — não uma tabela por UNIT — campos: `managed_product_id, wake_sku, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by`; **criada em `feat/unit-strategies` (migration `0003_unit_strategies_schema.sql`), não aplicada em produção**);
 - scheduler/heartbeat;
 - runs relevantes;
 - itens alterados/falhos/divergentes;
