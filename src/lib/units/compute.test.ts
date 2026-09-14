@@ -24,6 +24,59 @@ describe('computeUnit -- CT (HUNDRED + FIXADOR_CENTO)', () => {
   })
 })
 
+describe('computeUnit -- CT + NoCommercialPolicy (PROBLEMA 2)', () => {
+  it('commercialPolicyOverride=NONE -> CT vira identidade, nunca FIXADOR_CENTO', () => {
+    const r = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3, commercialPolicyOverride: 'NONE' })
+    expect(r).toMatchObject({ ok: true, unitClass: 'HUNDRED', policy: 'NONE' })
+    if (!r.ok) throw new Error('unreachable')
+    expect(r.wholesalePrice).toBeUndefined()
+    expect(r.wholesaleMinQty).toBeUndefined()
+  })
+
+  it('CT + NoCommercialPolicy produz numeros DIFERENTES de CT + FIXADOR_CENTO para a mesma entrada', () => {
+    const withPolicy = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3 })
+    const withoutPolicy = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3, commercialPolicyOverride: 'NONE' })
+    expect(withPolicy).toMatchObject({ ok: true, salePrice: 3.6, saleStock: 23 })
+    expect(withoutPolicy).toMatchObject({ ok: true, salePrice: 3, saleStock: 230 })
+  })
+})
+
+describe('computeUnit -- commercialPolicyConfig muda o resultado de HUNDRED (PROBLEMA 1)', () => {
+  it('markup 20% (default) vs 30%', () => {
+    const r20 = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3 })
+    const r30 = computeUnit({
+      unitRaw: 'CT',
+      cissPrice: 300,
+      cissStock: 2.3,
+      commercialPolicyConfig: { markupPercent: 30, wholesaleDiscountPercent: 20, stockExposurePercent: 10, wholesaleMinQty: 100 },
+    })
+    expect(r20).toMatchObject({ ok: true, salePrice: 3.6 })
+    expect(r30).toMatchObject({ ok: true, salePrice: 3.9 })
+  })
+
+  it('exposicao de estoque 10% (default) vs 15%', () => {
+    const r10 = computeUnit({ unitRaw: 'CT', cissPrice: 300, cissStock: 2.3 })
+    const r15 = computeUnit({
+      unitRaw: 'CT',
+      cissPrice: 300,
+      cissStock: 2.3,
+      commercialPolicyConfig: { markupPercent: 20, wholesaleDiscountPercent: 20, stockExposurePercent: 15, wholesaleMinQty: 100 },
+    })
+    expect(r10).toMatchObject({ ok: true, saleStock: 23 })
+    expect(r15).toMatchObject({ ok: true, saleStock: 34 })
+  })
+
+  it('DIRECT e PACKAGE_MEASURED ignoram commercialPolicyConfig por completo (nao tem policy)', () => {
+    const direct = computeUnit({
+      unitRaw: 'PC',
+      cissPrice: 2.07,
+      cissStock: 1894,
+      commercialPolicyConfig: { markupPercent: 999, wholesaleDiscountPercent: 999, stockExposurePercent: 999, wholesaleMinQty: 999 },
+    })
+    expect(direct).toMatchObject({ ok: true, unitClass: 'DIRECT', salePrice: 2.07, saleStock: 1894 })
+  })
+})
+
 describe('computeUnit -- KG/MT sem configuracao', () => {
   it('KG sem packageConfig -> CONFIGURATION_REQUIRED, zero write', () => {
     const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340 })

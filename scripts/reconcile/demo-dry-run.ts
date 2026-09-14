@@ -1,11 +1,11 @@
 // FASE B (§18) -- demonstracao local/read-only do motor puro de UNIT.
-// So importa o modulo puro (scripts/reconcile/units/compute.ts): zero Wake,
+// So importa o modulo puro (src/lib/units/compute.ts): zero Wake,
 // zero CISS, zero DB, zero write. Fixtures sanitizadas (sem SKU real), exceto
 // o caso PC que reproduz o exemplo ja publico no proprio prompt da fase (§17).
 //
-// Rodar: npx tsx scripts/reconcile/units/demo-dry-run.ts
+// Rodar: npx tsx scripts/reconcile/demo-dry-run.ts
 
-import { computeUnit } from './compute'
+import { computeUnit } from '../../src/lib/units/compute'
 
 type Case = { label: string; input: Parameters<typeof computeUnit>[0] }
 

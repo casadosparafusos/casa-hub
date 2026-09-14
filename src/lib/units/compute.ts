@@ -3,6 +3,7 @@
 // devem chamar -- ver §13 (uma so fonte de calculo, sem duplicar).
 
 import { applyFixadorCentoPolicy, applyNoCommercialPolicy } from './commercial-policy'
+import { resolveCommercialPolicy } from './policy-resolver'
 import { resolveUnit } from './resolver'
 import { computeDirect, computeHundred, computeMeasuredPackage } from './strategies'
 import type { ComputeUnitInput, UnitComputationResult } from './types'
@@ -45,23 +46,37 @@ export function computeUnit(input: ComputeUnitInput): UnitComputationResult {
 
     case 'HUNDRED': {
       const { baseUnitPrice, physicalUnits } = computeHundred(input.cissPrice, input.cissStock)
-      // FIXADOR_CENTO e a unica politica comercial usada hoje para HUNDRED
-      // (todo o catalogo CT gerenciado). Nao existe campo de politica por
-      // produto no banco ainda -- selecao centralizada aqui, de proposito,
-      // ate existir modelagem por produto (debt documentado em
-      // docs/ARCHITECTURE_TARGET.md). HUNDRED != FIXADOR_CENTO por definicao;
-      // isto e so a escolha default desta fase, nao uma regra da UNIT.
-      const policy = applyFixadorCentoPolicy(baseUnitPrice, physicalUnits)
+      // Selecao de policy centralizada em resolveCommercialPolicy (§3): HUNDRED
+      // normalization != FIXADOR_CENTO policy por definicao. O default abaixo
+      // (HUNDRED -> FIXADOR_CENTO) e so a escolha desta fase -- documentado em
+      // docs/ARCHITECTURE_TARGET.md -- porque nao existe campo de policy por
+      // managed product no banco ainda. commercialPolicyOverride torna
+      // CT + NoCommercialPolicy representavel hoje (teste e futuro uso real).
+      const policy = resolveCommercialPolicy('HUNDRED', input.commercialPolicyOverride)
+      if (policy === 'NONE') {
+        const noPolicy = applyNoCommercialPolicy(baseUnitPrice, physicalUnits)
+        return {
+          ok: true,
+          unitRaw: resolution.unitRaw,
+          unitNormalized: resolution.unitNormalized,
+          unitClass: 'HUNDRED',
+          policy: 'NONE',
+          salePrice: noPolicy.salePrice,
+          saleStock: noPolicy.saleStock,
+          physicalUnits,
+        }
+      }
+      const fixador = applyFixadorCentoPolicy(baseUnitPrice, physicalUnits, input.commercialPolicyConfig)
       return {
         ok: true,
         unitRaw: resolution.unitRaw,
         unitNormalized: resolution.unitNormalized,
         unitClass: 'HUNDRED',
         policy: 'FIXADOR_CENTO',
-        salePrice: policy.retailUnitPrice,
-        saleStock: policy.wakeStock,
-        wholesalePrice: policy.wholesaleUnitPrice,
-        wholesaleMinQty: policy.wholesaleMinQty,
+        salePrice: fixador.retailUnitPrice,
+        saleStock: fixador.wakeStock,
+        wholesalePrice: fixador.wholesaleUnitPrice,
+        wholesaleMinQty: fixador.wholesaleMinQty,
         physicalUnits,
       }
     }

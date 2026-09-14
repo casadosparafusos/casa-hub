@@ -13,6 +13,32 @@ export interface PackageSaleUnitConfig {
   quantityPerSaleUnit: number
 }
 
+/**
+ * Parametros configuraveis da FIXADOR_CENTO policy. O modulo puro NAO le
+ * settings (ver docs/CASA_HUB_FASE_B_UNIT_STRATEGIES.md §4) -- este tipo
+ * existe para a camada de aplicacao (src/lib/settings.ts) e o reconciliador
+ * (leitura read-only da tabela settings) injetarem o MESMO config aqui,
+ * em vez de cada um reimplementar a conta com literais proprios.
+ */
+export interface CommercialPolicyConfig {
+  /** % de markup sobre o preco base para chegar no varejo (producao: 20). */
+  markupPercent: number
+  /** % de desconto do atacado sobre o varejo (producao: 20). */
+  wholesaleDiscountPercent: number
+  /** % do estoque fisico exposto como estoque de venda (producao: 10). */
+  stockExposurePercent: number
+  /** Quantidade minima de compra para valer o preco de atacado (producao: 100). */
+  wholesaleMinQty: number
+}
+
+/** Defaults de producao -- usados quando o chamador nao informa commercialPolicyConfig (ex.: testes do modulo puro isolado). */
+export const DEFAULT_COMMERCIAL_POLICY_CONFIG: CommercialPolicyConfig = {
+  markupPercent: 20,
+  wholesaleDiscountPercent: 20,
+  stockExposurePercent: 10,
+  wholesaleMinQty: 100,
+}
+
 export interface ComputeUnitInput {
   /** Campo `unit` cru do CISS -- nunca inferir por nome/descricao/categoria/SKU. */
   unitRaw: string | null | undefined
@@ -20,6 +46,14 @@ export interface ComputeUnitInput {
   cissStock: number
   /** Obrigatorio para PACKAGE_MEASURED (KG/MT); ignorado nas outras classes. */
   packageConfig?: PackageSaleUnitConfig | null
+  /** Parametros da FIXADOR_CENTO policy; default = DEFAULT_COMMERCIAL_POLICY_CONFIG quando ausente. */
+  commercialPolicyConfig?: CommercialPolicyConfig
+  /**
+   * Forca a CommercialPolicy independente da UnitClass resolvida. Existe para
+   * tornar CT + NoCommercialPolicy representavel (hoje nao ha campo de policy
+   * por managed product no banco -- ver resolveCommercialPolicy em ./policy-resolver).
+   */
+  commercialPolicyOverride?: CommercialPolicyKind
 }
 
 export type UnitComputationResult =

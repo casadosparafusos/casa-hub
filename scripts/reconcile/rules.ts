@@ -7,13 +7,13 @@
 // Fonte de verdade da unidade = campo `unit` do CISS. NUNCA inferir por
 // nome. Unidade desconhecida = fail closed, nunca "assume" DIRECT/CENTO.
 
-import { computeUnit, resolveUnit, type UnitClass, type UnitComputationResult } from './units'
+import { computeUnit, resolveUnit, type UnitClass, type UnitComputationResult } from '../../src/lib/units'
 
-export { moneyRound, safeFloor } from './units'
+export { moneyRound, safeFloor } from '../../src/lib/units'
 
-// Espelham scripts/reconcile/units/commercial-policy.ts (FIXADOR_CENTO) e
+// Espelham src/lib/units/commercial-policy.ts (FIXADOR_CENTO) e
 // strategies.ts (HUNDRED) -- so para exibicao no meta do relatorio
-// (ver run.ts), nunca usadas no calculo (isso vem de ./units).
+// (ver run.ts), nunca usadas no calculo (isso vem de ../../src/lib/units).
 export const CENTO_UNITS = 100
 export const CENTO_STOCK_PERCENT = 10
 export const CENTO_RETAIL_MULTIPLIER = 1.2
