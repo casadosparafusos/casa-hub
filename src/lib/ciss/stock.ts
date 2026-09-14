@@ -27,6 +27,8 @@ export interface CissStockRow {
   stock: number
   /** true = o CISS respondeu OK mas sem nenhuma linha pro produto (nunca teve saldo registrado) -- tratado como 0 */
   noRecord?: boolean
+  /** UNIT crua do CISS (ex: "CT", "PC", "KG"). Nunca normalizada aqui -- ver src/lib/units. */
+  unitRaw?: string | null
 }
 
 interface StockCompany {
@@ -72,7 +74,7 @@ async function fetchOneProductStock(
   // usuario confirmou estarem com 0 no ERP) significa "nunca teve saldo",
   // ou seja, zero. Erro de rede/5xx/timeout NAO chega aqui: cissGet lanca e
   // a run inteira falha, entao isto nunca zera estoque por queda do CISS.
-  if (!item) return { productId: cissProductId, stock: 0, noRecord: true }
+  if (!item) return { productId: cissProductId, stock: 0, noRecord: true, unitRaw: null }
 
   const company = item.companies?.find((c) => c.enterprise_id === opts.enterprise)
   // Empresa/local ausente na resposta = zero legitimo (produto existe mas
@@ -80,7 +82,11 @@ async function fetchOneProductStock(
   // ja documentada e validada em producao pela Reposicao.
   const stock = company?.stocks?.find((s) => s.location_id === opts.location)
   const quantity = stock?.quantity
-  return { productId: cissProductId, stock: quantity != null && Number.isFinite(quantity) ? quantity : 0 }
+  return {
+    productId: cissProductId,
+    stock: quantity != null && Number.isFinite(quantity) ? quantity : 0,
+    unitRaw: item.unit ?? null,
+  }
 }
 
 export async function fetchStockForProducts(
