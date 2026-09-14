@@ -47,6 +47,11 @@ describe('computeUnit -- KG/MT sem configuracao', () => {
     const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageConfig: { quantityPerSaleUnit: 18 } })
     expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', policy: 'NONE', salePrice: 180, saleStock: 18, remainder: 16 })
   })
+
+  it('MT com packageConfig valido -> ok (37m / 2.5 = 14, sobra 2m)', () => {
+    const r = computeUnit({ unitRaw: 'MT', cissPrice: 8, cissStock: 37, packageConfig: { quantityPerSaleUnit: 2.5 } })
+    expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', policy: 'NONE', salePrice: 20, saleStock: 14, remainder: 2 })
+  })
 })
 
 describe('computeUnit -- UNIT desconhecida', () => {
