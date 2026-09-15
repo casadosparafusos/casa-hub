@@ -66,4 +66,47 @@ describe('calculateUnitPrice', () => {
   it('rejeita preco nao finito', () => {
     expect(() => calculateUnitPrice({ unitRaw: 'PC', cissPrice: Number.NaN })).toThrow()
   })
+
+  // FASE B.1 (PROBLEMA 1): prova que commercialPolicyConfig (settings via
+  // src/lib/settings.ts#getCommercialPolicyConfig, injetado por
+  // src/lib/sync/engine.ts) realmente afeta o resultado -- nao fica so
+  // aceito na assinatura e ignorado no calculo.
+  it('CT: markup de settings (30%) muda o retailPrice em vez do default (20%)', () => {
+    const withDefault = calculateUnitPrice({ unitRaw: 'CT', cissPrice: 300 })
+    const withCustomMarkup = calculateUnitPrice({
+      unitRaw: 'CT',
+      cissPrice: 300,
+      commercialPolicyConfig: { markupPercent: 30, wholesaleDiscountPercent: 20, stockExposurePercent: 10, wholesaleMinQty: 100 },
+    })
+    expect(withDefault.ok).toBe(true)
+    expect(withCustomMarkup.ok).toBe(true)
+    if (!withDefault.ok || !withCustomMarkup.ok) return
+    expect(withDefault.retailPrice).toBe(3.6) // (300/100) * 1.2
+    expect(withCustomMarkup.retailPrice).toBe(3.9) // (300/100) * 1.3
+    expect(withCustomMarkup.retailPrice).not.toBe(withDefault.retailPrice)
+  })
+
+  it('CT: desconto de atacado de settings (30%) muda o wholesalePrice em vez do default (20%)', () => {
+    const withCustomDiscount = calculateUnitPrice({
+      unitRaw: 'CT',
+      cissPrice: 300,
+      commercialPolicyConfig: { markupPercent: 20, wholesaleDiscountPercent: 30, stockExposurePercent: 10, wholesaleMinQty: 100 },
+    })
+    expect(withCustomDiscount.ok).toBe(true)
+    if (!withCustomDiscount.ok) return
+    expect(withCustomDiscount.retailPrice).toBe(3.6) // markup inalterado
+    expect(withCustomDiscount.wholesalePrice).toBe(2.52) // 3.6 * 0.7, nao 3.6 * 0.8
+  })
+
+  it('DIRECT: commercialPolicyConfig customizado nao afeta preco (politica so se aplica a HUNDRED)', () => {
+    const result = calculateUnitPrice({
+      unitRaw: 'PC',
+      cissPrice: 12.5,
+      commercialPolicyConfig: { markupPercent: 99, wholesaleDiscountPercent: 99, stockExposurePercent: 99, wholesaleMinQty: 1 },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.retailPrice).toBe(12.5)
+    expect(result.wholesalePrice).toBeNull()
+  })
 })

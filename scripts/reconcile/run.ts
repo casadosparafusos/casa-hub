@@ -1,3 +1,4 @@
+import type { CommercialPolicyConfig } from '../../src/lib/units'
 import { CissAbortError, CissReader, type CissReaderOptions, type CissStockOutcome } from './ciss-reader'
 import type { ManagedProductRow } from './db-readonly'
 import type { FetchLike } from './http'
@@ -47,6 +48,8 @@ export interface RunConfig {
   /** Limita a varredura de /produtos ao intervalo de produtoVarianteId da whitelist. */
   useVariantRange: boolean
   packageWeights?: Map<string, number>
+  /** Ponte read-only (FASE B.1, PROBLEMA 1): settings observados, montados em reconcile-readonly.ts. Ausente = DEFAULT_COMMERCIAL_POLICY_CONFIG. */
+  commercialPolicyConfig?: CommercialPolicyConfig
   log?: (msg: string) => void
   now?: () => Date
   extraMeta?: Record<string, unknown>
@@ -190,6 +193,7 @@ export async function runReconciliation(cfg: RunConfig): Promise<ReconciliationR
     wakeTable,
     tableError,
     packageWeights: cfg.packageWeights ?? new Map(),
+    commercialPolicyConfig: cfg.commercialPolicyConfig,
   })
 
   const finishedAt = now()
@@ -231,6 +235,7 @@ export async function runReconciliation(cfg: RunConfig): Promise<ReconciliationR
         price_tolerance: PRICE_TOLERANCE,
         price_table_expected: 'precoPor = varejo esperado (precoDe da tabela registrado, sem julgamento)',
         kg_package_weights_configured: cfg.packageWeights?.size ?? 0,
+        commercial_policy_config_used: cfg.commercialPolicyConfig ?? 'DEFAULT_COMMERCIAL_POLICY_CONFIG (nenhum settings observado)',
       },
       warnings,
       ...cfg.extraMeta,

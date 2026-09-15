@@ -57,4 +57,34 @@ describe('calculateUnitStock', () => {
     if (result.ok) return
     expect(result.reason).toBe('UNSUPPORTED_UNIT')
   })
+
+  // FASE B.1 (PROBLEMA 1): prova que commercialPolicyConfig (settings via
+  // src/lib/settings.ts#getCommercialPolicyConfig, injetado por
+  // src/lib/sync/engine.ts) realmente afeta o resultado -- nao fica so
+  // aceito na assinatura e ignorado no calculo.
+  it('CT: exposicao de estoque de settings (15%) muda o targetWakeStock em vez do default (10%)', () => {
+    const withDefault = calculateUnitStock({ unitRaw: 'CT', cissStock: 2 }) // 2 cento = 200 parafusos
+    const withCustomExposure = calculateUnitStock({
+      unitRaw: 'CT',
+      cissStock: 2,
+      commercialPolicyConfig: { markupPercent: 20, wholesaleDiscountPercent: 20, stockExposurePercent: 15, wholesaleMinQty: 100 },
+    })
+    expect(withDefault.ok).toBe(true)
+    expect(withCustomExposure.ok).toBe(true)
+    if (!withDefault.ok || !withCustomExposure.ok) return
+    expect(withDefault.targetWakeStock).toBe(20) // 200 * 10%
+    expect(withCustomExposure.targetWakeStock).toBe(30) // 200 * 15%
+    expect(withCustomExposure.targetWakeStock).not.toBe(withDefault.targetWakeStock)
+  })
+
+  it('DIRECT: commercialPolicyConfig customizado nao afeta estoque (politica so se aplica a HUNDRED)', () => {
+    const result = calculateUnitStock({
+      unitRaw: 'PC',
+      cissStock: 7,
+      commercialPolicyConfig: { markupPercent: 99, wholesaleDiscountPercent: 99, stockExposurePercent: 1, wholesaleMinQty: 1 },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.targetWakeStock).toBe(7)
+  })
 })

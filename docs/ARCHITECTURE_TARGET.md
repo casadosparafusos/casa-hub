@@ -67,7 +67,7 @@ Separar:
 - `managed_products`;
 - estado atual por produto;
 - UNIT observada;
-- `product_sale_unit_config` (genérica para KG e MT — não uma tabela por UNIT — campos: `managed_product_id, wake_sku, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by`; **criada em `feat/unit-strategies` (migration `0003_unit_strategies_schema.sql`), não aplicada em produção**);
+- `product_sale_unit_config` (genérica para KG e MT — não uma tabela por UNIT — campos: `managed_product_id, wake_sku, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by`; **criada em `feat/unit-strategies` (migration `0003_unit_strategies_schema.sql`), não aplicada em produção**). Integridade provada contra banco real na FASE B.1 (hardening): FK, índice único parcial (`active=1`) e CHECK `quantity_per_sale_unit > 0` funcionam no nível do banco. **Gap conhecido, não corrigido**: `source_unit` só é restrito a KG/MT pelo tipo TypeScript — não há CHECK/enum no SQL; sem impacto funcional hoje porque o motor (`UnitResolver`) falha closed antes de qualquer escrita para uma UNIT fora do mapa;
 - scheduler/heartbeat;
 - runs relevantes;
 - itens alterados/falhos/divergentes;

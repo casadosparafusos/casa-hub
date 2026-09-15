@@ -15,7 +15,7 @@
 // priceTableExpected = result.salePrice, NUNCA wholesalePrice). Nenhum
 // caminho de escrita real (src/lib/sync/engine.ts) consome wholesalePrice
 // hoje.
-import { computeUnit, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
+import { computeUnit, type CommercialPolicyConfig, type CommercialPolicyKind, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
 
 export interface UnitPriceInput {
   /** Campo `unit` cru do CISS -- nunca inferir por nome/descricao/SKU. */
@@ -24,6 +24,10 @@ export interface UnitPriceInput {
   cissPrice: number
   /** Obrigatorio para PACKAGE_MEASURED (KG/MT); ignorado nas outras classes. */
   packageConfig?: PackageSaleUnitConfig | null
+  /** Parametros de FIXADOR_CENTO vindos de settings (src/lib/settings.ts#getCommercialPolicyConfig); default = DEFAULT_COMMERCIAL_POLICY_CONFIG quando ausente (ver src/lib/units/types.ts). */
+  commercialPolicyConfig?: CommercialPolicyConfig
+  /** Forca a policy independente da UnitClass -- ver FASE B.1 PROBLEMA 2 (CT + NoCommercialPolicy). */
+  commercialPolicyOverride?: CommercialPolicyKind
 }
 
 export type UnitPriceResult =
@@ -52,6 +56,8 @@ export function calculateUnitPrice(input: UnitPriceInput): UnitPriceResult {
     cissPrice: input.cissPrice,
     cissStock: 0, // preco e estoque sao matematicamente independentes no motor de UNIT -- placeholder inofensivo.
     packageConfig: input.packageConfig ?? null,
+    commercialPolicyConfig: input.commercialPolicyConfig,
+    commercialPolicyOverride: input.commercialPolicyOverride,
   })
 
   if (!result.ok) {

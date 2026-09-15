@@ -1,6 +1,6 @@
 # STATUS — Casa Hub
 
-Atualizado em 14/09/2026 (FASE B: implementação dos `UnitStrategy` em `feat/unit-strategies`, aguardando revisão do ChatGPT e autorização do usuário — não mergeado, não deployado).
+Atualizado em 15/09/2026 (FASE B.1: hardening dos `UnitStrategy` em `feat/unit-strategies`, aguardando revisão do ChatGPT e autorização do usuário — não mergeado, não deployado).
 
 ## Produção
 
@@ -14,7 +14,7 @@ Atualizado em 14/09/2026 (FASE B: implementação dos `UnitStrategy` em `feat/un
 | `audit/fase-0-runtime-readonly` | main | FASE 0: auditoria de runtime. **PARTIAL**, consolidada em `main` via FASE A/A.1. |
 | `audit/reconciliacao-readonly` | main | Reconciliador READ-ONLY. Executado 1× em produção em 11/09/2026 (SHA `c7616d7`). Consolidada em `main` via FASE A/A.1. |
 | `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS + decisões OWNER_CONFIRMED em 11/09/2026. Consolidada em `main` via FASE A/A.1. |
-| `feat/unit-strategies` | `main` (`4ebedec`) | **Branch atual (FASE B).** Implementa o motor `UnitResolver → UnitStrategy → CommercialPolicy` (mapa OWNER_CONFIRMED), integra `sync/engine.ts` (`syncPrices()`/`syncStock()`) ao motor, persiste a UNIT observada por produto, cria a tabela `product_sale_unit_config`. 295 testes (287 pré-existentes + 8 novos de integração do `sync/engine.ts`), typecheck e build limpos. **Não mergeado. Não deployado. Migration não aplicada em produção.** Os 16 produtos PC mal-rotulados e o produto KG atuais na Wake **não foram corrigidos** (fora de escopo). |
+| `feat/unit-strategies` | `main` (`4ebedec`) | **Branch atual (FASE B + FASE B.1).** Implementa o motor `UnitResolver → UnitStrategy → CommercialPolicy` (mapa OWNER_CONFIRMED), integra `sync/engine.ts` (`syncPrices()`/`syncStock()`) ao motor, persiste a UNIT observada por produto, cria a tabela `product_sale_unit_config`. FASE B.1 (hardening) somou `WHOLESALE_DISCOUNT_PERCENT`/`getCommercialPolicyConfig()` (conecta `FIXADOR_CENTO` aos settings em vez de hardcoded), isolamento writer-spy nos testes de sync, testes de integridade de `product_sale_unit_config` contra banco real, testes de fronteira de precisão monetária e prova de fail-closed pra UNIT sem registro. 390 testes no total, typecheck e build limpos. **Não mergeado. Não deployado. Migration não aplicada em produção.** Os 16 produtos PC mal-rotulados e o produto KG atuais na Wake **não foram corrigidos** (fora de escopo). |
 
 ## Censo de UNITs do CISS + mapa canônico OWNER_CONFIRMED — `audit/ciss-unit-census`
 
@@ -105,6 +105,17 @@ Implementação do motor real de UNIT, sobre o mapa OWNER_CONFIRMED do censo (11
 - Testes: 295 no total (287 pré-existentes + 8 novos de integração de `sync/engine.ts` cobrindo DIRECT/HUNDRED/PACKAGE_MEASURED com e sem config/UNSUPPORTED_UNIT, persistência em `sync_product_state`, busca única de CISS e o invariante `appliedProducts === 0` em dry-run). Typecheck e `npm run build` limpos.
 - **Nada disso corrige os 16 produtos PC mal-rotulados nem o produto KG hoje ao vivo na Wake** — motor de produção (`main`) continua na fórmula antiga até merge + deploy explícitos, autorizados separadamente.
 
+## FASE B.1 — Hardening — `feat/unit-strategies` (15/09/2026)
+
+Endurecimento do motor da FASE B, sobre a mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS. Sete pontos auditados:
+
+- **`FIXADOR_CENTO` conectado aos settings**: `settings.ts` ganhou `WHOLESALE_DISCOUNT_PERCENT` (default 20) e `getCommercialPolicyConfig()`, que lê as 4 regras (`UNIT_PRICE_MARKUP_PERCENT`, `WHOLESALE_DISCOUNT_PERCENT`, `STOCK_PERCENT`, `WHOLESALE_MIN_QTY`) com fallback pro valor hardcoded anterior. `sync/engine.ts`, `pricing/engine.ts`, `inventory/engine.ts` e o reconciliador READ-ONLY (`scripts/reconcile-readonly.ts`/`reconcile/*.ts`) passaram a receber e usar essa config em vez do `DEFAULT_COMMERCIAL_POLICY_CONFIG` fixo — resolve o débito técnico sinalizado na FASE B (valores hardcoded, `settings.ts` sem efeito nesse caminho).
+- **Isolamento writer-spy** nos testes de integração de `sync/engine.ts` — evita vazamento de estado entre testes.
+- **Integridade de `product_sale_unit_config`** provada contra banco SQLite real (migrations de produção, `foreign_keys=ON`): FK enforcement, índice único parcial (só `active=1`), CHECK `quantity_per_sale_unit > 0` — todos confirmados no nível do banco, não só por leitura de código. **Gap confirmado, não corrigido nesta fase**: `source_unit` só é restrito a KG/MT no tipo TypeScript, não por CHECK/enum no schema SQL — corrigir exigiria nova migration (fora de escopo; motor falha closed antes de qualquer escrita, então sem impacto funcional hoje). `wake_sku` denormalizado também pode divergir sem erro — sem impacto porque o sync nunca lê esse campo (só `managed_product_id`).
+- **Precisão monetária**: testes de fronteira dedicados para `moneyRound`/`cleanNumber`/`safeFloor` (`src/lib/units/decimal.test.ts`) e para `computeMeasuredPackage` com `quantity_per_sale_unit` fracionário (2.5, 0.3). Achado confirmado (não é bug): `moneyRound` já corrige corretamente os casos clássicos de ruído de float `1.005→1.01` e `2.675→2.68` via `+ Number.EPSILON`.
+- **Compatibilidade CT** (HUNDRED + FIXADOR_CENTO): já coberta pelos testes pré-existentes de `compute.test.ts` — nenhuma lacuna encontrada.
+- Testes: **390 no total** (295 da FASE B + 95 novos/ajustados de hardening). `tsc --noEmit`, `vitest run` e `npm run build` limpos.
+
 ## Pendências conhecidas (aguardando aprovação)
 
 - **CT = CENTO — OWNER_CONFIRMED em 11/09/2026, motor implementado em `feat/unit-strategies`.** Falta: revisão, merge e deploy explicitamente autorizados para a produção parar de ignorar `unit`.
@@ -114,4 +125,5 @@ Implementação do motor real de UNIT, sobre o mapa OWNER_CONFIRMED do censo (11
 - **KG sem `quantity_per_sale_unit`** (SKU 12852) → `CONFIGURATION_REQUIRED`. Schema `product_sale_unit_config` já existe na branch (não aplicada em produção); falta camada de CRUD/UI para popular por produto.
 - **Promoção 10365:** falta confirmar a semântica da condição 4 / lógica 3 / `23085` e da ação 2.
 - **3 SKUs sem saldo no CISS** (1273, 28875, 28899; o 28875 também sem `retail_price`): pedir ao SIGAS.
-- **`FIXADOR_CENTO` com valores hardcoded** (markup 20%, atacado -20%, exposição 10%, `wholesaleMinQty` 100) — não configurável via settings; débito técnico pré-existente, não corrigido nesta fase.
+- ~~**`FIXADOR_CENTO` com valores hardcoded**~~ — **resolvido na FASE B.1**: agora configurável via settings (`getCommercialPolicyConfig()`), com fallback pros mesmos valores default.
+- **`product_sale_unit_config.source_unit` sem CHECK/enum no banco** — só restrito no tipo TypeScript; um valor fora de KG/MT chegando por fora do app (SQL bruto, migração de dados) seria aceito pelo schema. Sem impacto funcional hoje (o motor falha closed antes de qualquer escrita), mas corrigir exigiria nova migration — fora de escopo da FASE B.1.

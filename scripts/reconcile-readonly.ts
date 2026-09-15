@@ -23,6 +23,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { DEFAULT_COMMERCIAL_POLICY_CONFIG, type CommercialPolicyConfig } from '../src/lib/units'
 import { parseArgs } from './reconcile/cli-args'
 import { readDbSnapshot, settingValue } from './reconcile/db-readonly'
 import type { FetchLike } from './reconcile/http'
@@ -75,14 +76,31 @@ async function main(): Promise<number> {
   const cissLocationSource = intSetting(s('CISS_STOCK_LOCATION')) === null ? 'default' : 'settings/env'
   const observed = {
     UNIT_PRICE_MARKUP_PERCENT: s('UNIT_PRICE_MARKUP_PERCENT'),
+    WHOLESALE_DISCOUNT_PERCENT: s('WHOLESALE_DISCOUNT_PERCENT'),
     STOCK_PERCENT: s('STOCK_PERCENT'),
     WHOLESALE_MIN_QTY: s('WHOLESALE_MIN_QTY'),
     CISS_PRICE_PROVIDER: env.CISS_PRICE_PROVIDER ?? null,
   }
   const divergences: string[] = []
   if (observed.UNIT_PRICE_MARKUP_PERCENT !== null && Number(observed.UNIT_PRICE_MARKUP_PERCENT) !== 20) divergences.push(`UNIT_PRICE_MARKUP_PERCENT=${observed.UNIT_PRICE_MARKUP_PERCENT} (regra canonica: 20)`)
+  if (observed.WHOLESALE_DISCOUNT_PERCENT !== null && Number(observed.WHOLESALE_DISCOUNT_PERCENT) !== 20) divergences.push(`WHOLESALE_DISCOUNT_PERCENT=${observed.WHOLESALE_DISCOUNT_PERCENT} (regra canonica: 20)`)
   if (observed.STOCK_PERCENT !== null && Number(observed.STOCK_PERCENT) !== 10) divergences.push(`STOCK_PERCENT=${observed.STOCK_PERCENT} (regra canonica: 10)`)
   if (observed.WHOLESALE_MIN_QTY !== null && Number(observed.WHOLESALE_MIN_QTY) !== 100) divergences.push(`WHOLESALE_MIN_QTY=${observed.WHOLESALE_MIN_QTY} (regra canonica: 100)`)
+
+  // FASE B.1 (PROBLEMA 1): antes disso, `observed` so alimentava um log de
+  // divergencia (comparado a constantes canonicas hardcoded) -- o proprio
+  // calculo esperado (computeExpected) nunca via esses settings, entao o
+  // reconciliador comparava a Wake contra DEFAULT_COMMERCIAL_POLICY_CONFIG
+  // mesmo quando a producao usava outro valor configurado. Monta o mesmo
+  // shape que src/lib/settings.ts#getCommercialPolicyConfig produz na app,
+  // com fallback individual por campo (nao all-or-nothing) pro default
+  // puro -- 100% read-only, nenhuma escrita em settings.
+  const commercialPolicyConfig: CommercialPolicyConfig = {
+    markupPercent: observed.UNIT_PRICE_MARKUP_PERCENT !== null ? Number(observed.UNIT_PRICE_MARKUP_PERCENT) : DEFAULT_COMMERCIAL_POLICY_CONFIG.markupPercent,
+    wholesaleDiscountPercent: observed.WHOLESALE_DISCOUNT_PERCENT !== null ? Number(observed.WHOLESALE_DISCOUNT_PERCENT) : DEFAULT_COMMERCIAL_POLICY_CONFIG.wholesaleDiscountPercent,
+    stockExposurePercent: observed.STOCK_PERCENT !== null ? Number(observed.STOCK_PERCENT) : DEFAULT_COMMERCIAL_POLICY_CONFIG.stockExposurePercent,
+    wholesaleMinQty: observed.WHOLESALE_MIN_QTY !== null ? Number(observed.WHOLESALE_MIN_QTY) : DEFAULT_COMMERCIAL_POLICY_CONFIG.wholesaleMinQty,
+  }
 
   const range = variantRange(snapshot.products)
   log(`[db] ${snapshot.products.length} produtos ativos; CD=${wakeCdId} tabela=${priceTableId} promocao=${promotionId} CISS empresa=${cissEnterprise} local=${cissLocation}`)
@@ -144,6 +162,7 @@ async function main(): Promise<number> {
     ...(env.CISS_BASE_URL ? { cissBaseUrl: env.CISS_BASE_URL } : {}),
     useVariantRange: !args.fullScan,
     cissOptions: { concurrency: args.cissConcurrency },
+    commercialPolicyConfig,
     log,
     extraMeta: {
       settings_observed: observed,

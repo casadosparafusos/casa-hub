@@ -2,10 +2,10 @@ import 'server-only'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db'
 import { withLocks, LockUnavailableError } from './lock'
-import { checkRequiredUnconfirmed, stockSource } from '../settings'
+import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource } from '../settings'
 import { calculateUnitPrice } from '../pricing/engine'
 import { calculateUnitStock } from '../inventory/engine'
-import { moneyRound } from '../units'
+import { moneyRound, type CommercialPolicyConfig } from '../units'
 import { getActivePriceProvider } from '../ciss/price-provider'
 import { fetchStockForProducts, type CissStockRow } from '../ciss/stock'
 import {
@@ -144,13 +144,20 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
       .where(eq(schema.productSaleUnitConfig.active, true))
     const packageConfigs = new Map(packageConfigRows.map((r) => [r.managedProductId, { quantityPerSaleUnit: r.quantityPerSaleUnit }]))
 
+    // FASE B.1 (PROBLEMA 1) -- ponte settings -> CommercialPolicyConfig,
+    // lida UMA vez por run e injetada em syncPrices()/syncStock() (que por
+    // sua vez passam pra calculateUnitPrice()/calculateUnitStock()). O
+    // modulo puro (src/lib/units) nunca le settings/env diretamente -- ver
+    // src/lib/settings.ts#getCommercialPolicyConfig e no-write-path.test.ts.
+    const commercialPolicyConfig = await getCommercialPolicyConfig()
+
     let changed = 0
     let applied = 0
     let skipped = 0
     let failed = 0
 
     if (kind === 'price' || kind === 'both') {
-      const priceResult = await syncPrices(run.id, products, dryRun, stockByProduct, packageConfigs)
+      const priceResult = await syncPrices(run.id, products, dryRun, stockByProduct, packageConfigs, commercialPolicyConfig)
       changed += priceResult.changed
       applied += priceResult.applied
       skipped += priceResult.skipped
@@ -158,7 +165,7 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
     }
 
     if (kind === 'stock' || kind === 'both') {
-      const stockResult = await syncStock(run.id, products, dryRun, stockByProduct, packageConfigs)
+      const stockResult = await syncStock(run.id, products, dryRun, stockByProduct, packageConfigs, commercialPolicyConfig)
       changed += stockResult.changed
       applied += stockResult.applied
       skipped += stockResult.skipped
@@ -252,6 +259,7 @@ async function syncPrices(
   dryRun: boolean,
   stockByProduct: Map<string, CissStockRow>,
   packageConfigs: Map<number, { quantityPerSaleUnit: number }>,
+  commercialPolicyConfig: CommercialPolicyConfig,
 ) {
   let changed = 0, applied = 0, skipped = 0, failed = 0
 
@@ -300,7 +308,7 @@ async function syncPrices(
     const stockRow = stockByProduct.get(product.cissProductId)
     const unitRaw = stockRow?.unitRaw ?? null
     const packageConfig = packageConfigs.get(product.id) ?? null
-    const priceResult = calculateUnitPrice({ unitRaw, cissPrice: retailPrice, packageConfig })
+    const priceResult = calculateUnitPrice({ unitRaw, cissPrice: retailPrice, packageConfig, commercialPolicyConfig })
 
     if (!priceResult.ok) {
       // §1/§5: UNIT nao suportada ou config de PACKAGE_MEASURED faltando sao
@@ -529,6 +537,7 @@ async function syncStock(
   dryRun: boolean,
   stockByProduct: Map<string, CissStockRow>,
   packageConfigs: Map<number, { quantityPerSaleUnit: number }>,
+  commercialPolicyConfig: CommercialPolicyConfig,
 ) {
   let changed = 0, applied = 0, skipped = 0, failed = 0
 
@@ -571,7 +580,7 @@ async function syncStock(
 
     const unitRaw = row?.unitRaw ?? null
     const packageConfig = packageConfigs.get(product.id) ?? null
-    const stockResult = calculateUnitStock({ unitRaw, cissStock: erpStock, packageConfig })
+    const stockResult = calculateUnitStock({ unitRaw, cissStock: erpStock, packageConfig, commercialPolicyConfig })
 
     if (!stockResult.ok) {
       // Mesma logica de syncPrices(): UNIT nao suportada/config faltando ->

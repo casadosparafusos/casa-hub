@@ -1,3 +1,4 @@
+import type { CommercialPolicyConfig } from '../../src/lib/units'
 import type { CissStockOutcome } from './ciss-reader'
 import type { ManagedProductRow } from './db-readonly'
 import { classifyUnit, computeExpected, pricesMatch } from './rules'
@@ -61,6 +62,8 @@ export interface ReconcileInput {
   tableError: string | null
   /** ciss_product_id -> kg por caixa (so UNIT=KG). Vazio nesta rodada. */
   packageWeights: Map<string, number>
+  /** Ponte read-only (FASE B.1, PROBLEMA 1): settings observados via db-readonly.ts (ver reconcile-readonly.ts). Ausente = DEFAULT_COMMERCIAL_POLICY_CONFIG. */
+  commercialPolicyConfig?: CommercialPolicyConfig
 }
 
 export interface Aggregates {
@@ -182,7 +185,7 @@ export function reconcileProduct(p: ManagedProductRow, input: ReconcileInput): R
 
   const weight = unit.unit === 'PACKAGE_MEASURED' ? (input.packageWeights.get(p.cissProductId) ?? null) : null
   row.package_weight_kg = weight
-  const expected = computeExpected({ unitRaw: rec.unitRaw, cissPrice: price, cissStock: rec.quantity, packageWeightKg: weight })
+  const expected = computeExpected({ unitRaw: rec.unitRaw, cissPrice: price, cissStock: rec.quantity, packageWeightKg: weight, commercialPolicyConfig: input.commercialPolicyConfig })
   if (expected.kind === 'configuration_required') return finish(row, 'CONFIGURATION_REQUIRED', [expected.error, ...notes])
   if (expected.kind === 'invalid_input') return finish(row, 'ERROR', [expected.error, ...notes])
 

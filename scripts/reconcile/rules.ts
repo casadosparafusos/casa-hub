@@ -7,7 +7,7 @@
 // Fonte de verdade da unidade = campo `unit` do CISS. NUNCA inferir por
 // nome. Unidade desconhecida = fail closed, nunca "assume" DIRECT/CENTO.
 
-import { computeUnit, resolveUnit, type UnitClass, type UnitComputationResult } from '../../src/lib/units'
+import { computeUnit, resolveUnit, type CommercialPolicyConfig, type UnitClass, type UnitComputationResult } from '../../src/lib/units'
 
 export { moneyRound, safeFloor } from '../../src/lib/units'
 
@@ -41,6 +41,8 @@ export interface ExpectedInput {
   cissStock: number
   /** So para PACKAGE_MEASURED (KG/MT). null/undefined = embalagem nao cadastrada. */
   packageWeightKg?: number | null
+  /** Ponte read-only (FASE B.1, PROBLEMA 1): settings observados via db-readonly.ts, montados em reconcile-readonly.ts. Ausente = motor puro cai no DEFAULT_COMMERCIAL_POLICY_CONFIG (ver src/lib/units/types.ts). */
+  commercialPolicyConfig?: CommercialPolicyConfig
 }
 
 export type ExpectedResult =
@@ -66,6 +68,7 @@ export function computeExpected(input: ExpectedInput): ExpectedResult {
       cissPrice: input.cissPrice,
       cissStock: input.cissStock,
       packageConfig: input.packageWeightKg != null ? { quantityPerSaleUnit: input.packageWeightKg } : null,
+      commercialPolicyConfig: input.commercialPolicyConfig,
     })
   } catch (err) {
     // computeUnit lanca so pra corrupcao numerica genuina (NaN/preco negativo) --

@@ -73,4 +73,31 @@ describe('MeasuredPackageUnitStrategy (KG/MT)', () => {
     expect(outcome.result.saleStock).toBe(0)
     expect(outcome.result.remainder).toBe(0)
   })
+
+  it('fronteira de precisao (FASE B.1, PROBLEMA 6): KG com quantity_per_sale_unit=2.5 nao sofre ruido de float no preco nem no floor do estoque', () => {
+    // preco/kg=4.20 x 2.5kg/venda = 10.5 cru -- sem cleanNumber no preco
+    // (moneyRound ja limpa via Number.EPSILON), mas o ponto sensivel aqui e
+    // o floor: 12.5kg / 2.5 = 5 EXATO em decimal, porem 12.5/2.5 em IEEE-754
+    // pode carregar ruido dependendo da ordem das operacoes -- safeFloor
+    // garante que isso nunca vira 4 por baixo.
+    const outcome = computeMeasuredPackage(4.2, 12.5, 2.5)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.result.saleStock).toBe(5)
+    expect(outcome.result.salePrice).toBe(10.5)
+    expect(outcome.result.remainder).toBe(0)
+  })
+
+  it('fronteira de precisao (FASE B.1, PROBLEMA 6): MT com quantity_per_sale_unit=0.3 nao sofre ruido de float (0.3*3=0.8999999999999999 em JS cru)', () => {
+    expect(0.3 * 3).not.toBe(0.9)
+    // 0.9m de estoque / 0.3m por venda deveria dar exatamente 3 unidades
+    // vendaveis, sem sobra -- se o ruido de 0.3*3 vazasse pro calculo, o
+    // floor poderia cair pra 2 por engano.
+    const outcome = computeMeasuredPackage(15, 0.9, 0.3)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('unreachable')
+    expect(outcome.result.saleStock).toBe(3)
+    expect(outcome.result.remainder).toBe(0)
+    expect(outcome.result.salePrice).toBe(4.5)
+  })
 })

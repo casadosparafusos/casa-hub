@@ -8,7 +8,7 @@
 // qualquer produto. Essa suposicao foi removida por definicao da FASE B: a
 // UNIT real vem do campo `unit` do CISS (unitRaw), nunca inferida -- PC/UN/
 // etc (DIRECT) NAO passam pela multiplicacao por 100.
-import { computeUnit, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
+import { computeUnit, type CommercialPolicyConfig, type CommercialPolicyKind, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
 
 export interface UnitStockInput {
   /** Campo `unit` cru do CISS -- nunca inferir por nome/descricao/SKU. */
@@ -17,6 +17,10 @@ export interface UnitStockInput {
   cissStock: number
   /** Obrigatorio para PACKAGE_MEASURED (KG/MT); ignorado nas outras classes. */
   packageConfig?: PackageSaleUnitConfig | null
+  /** Parametros de FIXADOR_CENTO vindos de settings (src/lib/settings.ts#getCommercialPolicyConfig) -- so stockExposurePercent afeta o estoque, mas o config e unico e compartilhado com calculateUnitPrice(). */
+  commercialPolicyConfig?: CommercialPolicyConfig
+  /** Forca a policy independente da UnitClass -- ver FASE B.1 PROBLEMA 2 (CT + NoCommercialPolicy). */
+  commercialPolicyOverride?: CommercialPolicyKind
 }
 
 export type UnitStockResult =
@@ -42,6 +46,8 @@ export function calculateUnitStock(input: UnitStockInput): UnitStockResult {
     cissPrice: 0, // preco e estoque sao matematicamente independentes no motor de UNIT -- placeholder inofensivo.
     cissStock: input.cissStock,
     packageConfig: input.packageConfig ?? null,
+    commercialPolicyConfig: input.commercialPolicyConfig,
+    commercialPolicyOverride: input.commercialPolicyOverride,
   })
 
   if (!result.ok) {
