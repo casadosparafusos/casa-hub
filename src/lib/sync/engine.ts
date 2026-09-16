@@ -555,9 +555,17 @@ async function syncStock(
     return { changed, applied, skipped, failed }
   }
 
-  // Aviso informativo (NAO e erro) gravado no item -- usa a coluna
-  // error_message, que a tela so pinta de vermelho quando status='failed'.
-  const NO_RECORD_NOTE = 'Sem registro de estoque no ERP -- tratado como 0'
+  // BLOQUEIO E (FASE B.2): status explicito e fail-closed pra "CISS
+  // respondeu OK mas nunca teve linha de estoque pra este produto" --
+  // distinto de UNSUPPORTED_UNIT/CONFIGURATION_REQUIRED (que sao problema de
+  // UNIT, nao de ausencia de registro) e nunca tratado como estoque zero
+  // silencioso. Antes desta correcao, `noRecord` so alimentava um aviso
+  // (`note`) num ramo que exige stockResult.ok=true -- mas noRecord=true
+  // sempre forca unitRaw=null (ver ciss/stock.ts), que o UnitResolver
+  // sempre resolve como falha, entao esse ramo nunca era alcancado: o aviso
+  // ficava morto e o operador so via "UNIT nao processavel (UNSUPPORTED_UNIT)
+  // -- unit_raw=null", indistinguivel de uma UNIT desconhecida de verdade.
+  const NO_RECORD_NOTE = 'Sem registro de estoque no ERP (CISS OK, nenhuma linha em ESTOQUE_SALDO_ATUAL para este produto) -- fail-closed, nada escrito no Wake'
 
   const toApply: Array<{
     product: ManagedProduct
@@ -565,16 +573,36 @@ async function syncStock(
     sourceOldValue: number | null
     sourceNewValue: number
     targetOldValue: number | null
-    note: string | null
   }> = []
 
   for (const product of products) {
     const row = stockByProduct.get(product.cissProductId)
     const erpStock = row?.stock
-    const note = row?.noRecord ? NO_RECORD_NOTE : null
     if (erpStock === undefined) {
       failed++
       await logItem({ syncRunId, managedProductId: product.id, field: 'stock', status: 'failed', errorMessage: `Sem leitura de estoque CISS para ciss_product_id=${product.cissProductId}` })
+      continue
+    }
+
+    if (row?.noRecord) {
+      failed++
+      await upsertState(product.id, {
+        erpStock,
+        erpReadAt: new Date().toISOString(),
+        unitRaw: null,
+        unitNormalized: null,
+        unitClass: null,
+        unitResolutionStatus: 'NO_STOCK_RECORD',
+      })
+      await logItem({
+        syncRunId,
+        managedProductId: product.id,
+        field: 'stock',
+        sourceOldValue: null,
+        sourceNewValue: erpStock,
+        status: 'failed',
+        errorMessage: NO_RECORD_NOTE,
+      })
       continue
     }
 
@@ -618,7 +646,7 @@ async function syncStock(
 
     if (stockUnchanged) {
       skipped++
-      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue: state?.erpStock ?? null, sourceNewValue: erpStock, targetOldValue: state?.lastAppliedWakeStock ?? null, targetNewValue: stockResult.targetWakeStock, status: 'no_change', errorMessage: note })
+      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue: state?.erpStock ?? null, sourceNewValue: erpStock, targetOldValue: state?.lastAppliedWakeStock ?? null, targetNewValue: stockResult.targetWakeStock, status: 'no_change' })
       continue
     }
 
@@ -627,13 +655,13 @@ async function syncStock(
     const targetOldValue = state?.lastAppliedWakeStock ?? null
 
     if (dryRun) {
-      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue, sourceNewValue: erpStock, targetOldValue, targetNewValue: stockResult.targetWakeStock, status: 'planned', errorMessage: note })
+      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue, sourceNewValue: erpStock, targetOldValue, targetNewValue: stockResult.targetWakeStock, status: 'planned' })
     }
     // fora de dry-run o log so acontece depois da reconferencia, la embaixo.
 
     await upsertState(product.id, { erpStock, erpReadAt: new Date().toISOString(), calculatedWakeStock: stockResult.targetWakeStock, ...unitFields })
 
-    if (!dryRun) toApply.push({ product, targetStock: stockResult.targetWakeStock, sourceOldValue, sourceNewValue: erpStock, targetOldValue, note })
+    if (!dryRun) toApply.push({ product, targetStock: stockResult.targetWakeStock, sourceOldValue, sourceNewValue: erpStock, targetOldValue })
   }
 
   if (!dryRun && toApply.length > 0) {
@@ -752,7 +780,6 @@ async function syncStock(
             targetOldValue: b.targetOldValue,
             targetNewValue: b.targetStock,
             status: 'applied',
-            errorMessage: b.note,
             wakeAfterRaw: putResponseRaw,
           })
         } else {

@@ -1,9 +1,28 @@
 // Helpers de arredondamento centralizados -- fonte unica para toda a
 // engine de UNIT (app + reconciliador). Ver docs/CASA_HUB_FASE_B_UNIT_STRATEGIES.md §12.
 
-/** Arredondamento monetario -- 2 casas decimais, meio-para-cima. */
+/**
+ * Arredondamento monetario -- 2 casas decimais, meio-para-cima.
+ *
+ * BLOQUEIO D (FASE B.2, 16/09/2026): a abordagem anterior (`Number.EPSILON`
+ * antes do `* 100`) falha em casos comercialmente relevantes -- por
+ * exemplo `10.075` vira `10.07` em vez de `10.08`, porque o proprio
+ * `10.075 * 100` ja arredonda pra `1007.4999...` em ponto flutuante antes
+ * do EPSILON conseguir compensar. A troca de representacao decimal pra
+ * string via `Number(valor + 'e2')`/`Number(resultado + 'e-2')` desloca a
+ * casa decimal ANTES do `Math.round`, evitando o erro de precisao binaria
+ * na multiplicacao por 100 -- e' o padrao "exponential notation rounding",
+ * determinístico e testado nos 7 casos de fronteira do BLOQUEIO D (ver
+ * decimal.test.ts). Sinal tratado separadamente porque `Math.round` em
+ * JS arredonda `-0.5` pra `-0` (ties-to-positive-infinity), nao
+ * meio-para-cima em magnitude -- aplicar o arredondamento sobre o valor
+ * absoluto e reaplicar o sinal depois mantem "meio-para-cima" simetrico
+ * pros dois lados.
+ */
 export function moneyRound(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100
+  const sign = value < 0 ? -1 : 1
+  const abs = Math.abs(value)
+  return sign * Number(`${Math.round(Number(`${abs}e2`))}e-2`)
 }
 
 /**

@@ -8,13 +8,18 @@ import os from 'node:os'
 import path from 'node:path'
 import * as schema from './schema'
 
-// Testes de integridade de product_sale_unit_config (FASE B.1, PROBLEMA
-// 5/§6) -- banco SQLite real (arquivo temporario), migrado com as mesmas
-// migrations de producao, `foreign_keys = ON` igual a src/lib/db/index.ts.
-// Responde as 5 perguntas de auditoria do doc: FK, unicidade de config
-// ativa, restricao de source_unit, quantity_per_sale_unit > 0, e divergencia
-// de wake_sku denormalizado. NAO aplica nenhuma migration em producao --
-// so migra um arquivo .db temporario, descartado no final.
+// Testes de integridade de product_sale_unit_config -- banco SQLite real
+// (arquivo temporario), migrado com as mesmas migrations de producao,
+// `foreign_keys = ON` igual a src/lib/db/index.ts. NAO aplica nenhuma
+// migration em producao -- so migra um arquivo .db temporario, descartado
+// no final.
+//
+// FASE B.1 (PROBLEMA 5/§6): FK, unicidade de config ativa,
+// quantity_per_sale_unit > 0.
+// FASE B.2 (BLOQUEIO A/B, drizzle/0004_public_betty_brant.sql):
+// - source_unit agora tem CHECK IN ('KG','MT') no SQL, nao so no tipo TS;
+// - wake_sku foi removida da tabela (denormalizada, nunca lida pelo motor de
+//   sync -- ver decisao documentada em src/lib/db/schema.ts).
 
 let sqlite: Database.Database
 let db: ReturnType<typeof drizzle<typeof schema>>
@@ -53,12 +58,11 @@ async function insertManagedProduct(cissProductId: string) {
   return row
 }
 
-describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 5)', () => {
+describe('product_sale_unit_config -- integridade do schema (FASE B.1 + FASE B.2)', () => {
   it('FK managed_product_id: rejeita config apontando pra produto inexistente (foreign_keys=ON, igual producao)', async () => {
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: 999999,
-        wakeSku: 'SKU-INEXISTENTE',
         sourceUnit: 'KG',
         quantityPerSaleUnit: 1,
         active: true,
@@ -70,7 +74,6 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     const product = await insertManagedProduct('ciss-dup')
     await db.insert(schema.productSaleUnitConfig).values({
       managedProductId: product.id,
-      wakeSku: product.wakeSku,
       sourceUnit: 'KG',
       quantityPerSaleUnit: 5,
       active: true,
@@ -79,7 +82,6 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: product.id,
-        wakeSku: product.wakeSku,
         sourceUnit: 'MT',
         quantityPerSaleUnit: 2,
         active: true,
@@ -91,7 +93,6 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     const product = await insertManagedProduct('ciss-inactive-dup')
     await db.insert(schema.productSaleUnitConfig).values({
       managedProductId: product.id,
-      wakeSku: product.wakeSku,
       sourceUnit: 'KG',
       quantityPerSaleUnit: 5,
       active: false,
@@ -99,7 +100,6 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: product.id,
-        wakeSku: product.wakeSku,
         sourceUnit: 'MT',
         quantityPerSaleUnit: 2,
         active: false,
@@ -112,7 +112,6 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: product.id,
-        wakeSku: product.wakeSku,
         sourceUnit: 'KG',
         quantityPerSaleUnit: 0,
         active: true,
@@ -123,7 +122,6 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: product2.id,
-        wakeSku: product2.wakeSku,
         sourceUnit: 'KG',
         quantityPerSaleUnit: -5,
         active: true,
@@ -131,54 +129,63 @@ describe('product_sale_unit_config -- integridade do schema (FASE B.1, PROBLEMA 
     ).rejects.toThrow(/CHECK constraint failed/)
   })
 
-  it('ISSUE FOUND (nao corrigido nesta fase): source_unit NAO tem CHECK/enum no banco -- so no tipo TS -- valor fora de KG/MT e aceito', async () => {
-    // resolveUnit()/PACKAGE_UNITS (src/lib/units/resolver.ts) so reconhece
-    // KG/MT -- um valor invalido aqui nunca seria escrito no Wake (o motor
-    // puro falha closed antes disso), mas a INTEGRIDADE DO DADO em si nao e
-    // protegida pelo schema: drizzle's `text(..., {enum:[...]})` e so
-    // tipagem TypeScript, nao gera CREATE TABLE ... CHECK (ver
-    // drizzle/0003_unit_strategies_schema.sql, coluna source_unit e so
-    // `text NOT NULL`). Registrado aqui como gap conhecido pro relatorio
-    // final da FASE B.1 (PROBLEMA 5) -- fechar exigiria nova migration
-    // (fora do escopo desta fase, que proibe aplicar migration em producao).
+  it('BLOQUEIO A (FASE B.2): source_unit agora tem CHECK no banco -- PC (ou qualquer valor fora de KG/MT) e rejeitado mesmo por fora do tipo TS', async () => {
     const product = await insertManagedProduct('ciss-bad-unit')
     // Cast deliberado: simula um valor invalido chegando por fora do tipo TS
-    // (ex.: SQL bruto, migracao de dados, bug em outra camada) -- e
-    // exatamente o gap sob teste, nao um erro de digitacao a esconder.
-    const invalidSourceUnit = 'CT' as 'KG' | 'MT'
+    // (ex.: SQL bruto, migracao de dados, bug em outra camada) -- exatamente
+    // o cenario que o CHECK precisa cobrir, nao um erro de digitacao a
+    // esconder.
+    const invalidSourceUnit = 'PC' as 'KG' | 'MT'
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: product.id,
-        wakeSku: product.wakeSku,
         sourceUnit: invalidSourceUnit,
+        quantityPerSaleUnit: 1,
+        active: true,
+      }),
+    ).rejects.toThrow(/CHECK constraint failed/)
+  })
+
+  it('BLOQUEIO A (FASE B.2): source_unit=KG e aceito pelo CHECK do banco', async () => {
+    const product = await insertManagedProduct('ciss-unit-kg')
+    await expect(
+      db.insert(schema.productSaleUnitConfig).values({
+        managedProductId: product.id,
+        sourceUnit: 'KG',
         quantityPerSaleUnit: 1,
         active: true,
       }),
     ).resolves.not.toThrow()
   })
 
-  it('wake_sku denormalizado: schema nao impede divergencia do managed_products.wake_sku (motor de sync nunca le esse campo, so managedProductId -- ver src/lib/sync/engine.ts)', async () => {
-    const product = await insertManagedProduct('ciss-sku-drift')
-    // Grava um wake_sku deliberadamente DIFERENTE do managed_products.wake_sku
-    // real (product.wakeSku = 'SKU-ciss-sku-drift') -- nada no schema impede.
+  it('BLOQUEIO A (FASE B.2): source_unit=MT e aceito pelo CHECK do banco', async () => {
+    const product = await insertManagedProduct('ciss-unit-mt')
     await expect(
       db.insert(schema.productSaleUnitConfig).values({
         managedProductId: product.id,
-        wakeSku: 'SKU-COMPLETAMENTE-DIFERENTE',
-        sourceUnit: 'KG',
+        sourceUnit: 'MT',
         quantityPerSaleUnit: 1,
         active: true,
       }),
     ).resolves.not.toThrow()
+  })
+
+  it('BLOQUEIO B (FASE B.2): wake_sku nao existe mais na tabela -- linha inserida so com managed_product_id/source_unit/quantity_per_sale_unit', async () => {
+    const product = await insertManagedProduct('ciss-no-wake-sku-column')
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'KG',
+      quantityPerSaleUnit: 3,
+      active: true,
+    })
 
     const rows = await db
       .select()
       .from(schema.productSaleUnitConfig)
       .where(sql`${schema.productSaleUnitConfig.managedProductId} = ${product.id}`)
-    expect(rows[0]?.wakeSku).toBe('SKU-COMPLETAMENTE-DIFERENTE')
-    expect(rows[0]?.wakeSku).not.toBe(product.wakeSku)
-    // Sem impacto funcional hoje: src/lib/sync/engine.ts busca packageConfig
-    // por packageConfigs.get(product.id) (o FK), nunca por wake_sku desta
-    // tabela -- confirmado por leitura de codigo (grep em engine.ts).
+    expect(rows[0]).not.toHaveProperty('wakeSku')
+    // SKU so e resolvivel via JOIN com managed_products (identidade canonica),
+    // nunca mais denormalizado nesta tabela.
+    expect(rows[0]?.managedProductId).toBe(product.id)
   })
 })

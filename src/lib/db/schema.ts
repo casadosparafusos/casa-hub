@@ -70,7 +70,7 @@ export const syncProductState = sqliteTable(
     unitRaw: text('unit_raw'),
     unitNormalized: text('unit_normalized'),
     unitClass: text('unit_class', { enum: ['HUNDRED', 'DIRECT', 'PACKAGE_MEASURED'] }),
-    unitResolutionStatus: text('unit_resolution_status', { enum: ['OK', 'UNSUPPORTED_UNIT', 'CONFIGURATION_REQUIRED'] }),
+    unitResolutionStatus: text('unit_resolution_status', { enum: ['OK', 'UNSUPPORTED_UNIT', 'CONFIGURATION_REQUIRED', 'NO_STOCK_RECORD'] }),
 
     // ultimo valor calculado pelos motores (preco/estoque de destino)
     calculatedWakeUnitPrice: real('calculated_wake_unit_price'),
@@ -100,9 +100,14 @@ export const syncProductState = sqliteTable(
  * produto, o motor (src/lib/units) retorna CONFIGURATION_REQUIRED e nao
  * escreve nada -- nunca assume "1 KG" ou "1 MT" por padrao.
  *
- * `wakeSku` e denormalizado de managed_products.wake_sku (fonte de verdade
- * continua sendo o FK managed_product_id) so pra permitir lookup direto por
- * SKU sem join, mesmo padrao usado pelo reconciliador READ-ONLY.
+ * BLOQUEIO B (FASE B.2, 16/09/2026): `wake_sku` foi removida desta tabela.
+ * Era denormalizada de managed_products.wake_sku, podia divergir, e uma
+ * varredura completa do repositorio confirmou que NENHUM consumidor le
+ * `productSaleUnitConfig.wakeSku` -- toda a engine de sync/reconciliacao usa
+ * exclusivamente `managedProducts.wakeSku` (join por `managed_product_id`,
+ * que ja e a identidade canonica desta tabela). Uma camada de importacao
+ * futura (FASE 7) resolve SKU -> managed_product_id antes de gravar aqui,
+ * nunca precisando desnormalizar de volta.
  */
 export const productSaleUnitConfig = sqliteTable(
   'product_sale_unit_config',
@@ -111,7 +116,6 @@ export const productSaleUnitConfig = sqliteTable(
     managedProductId: integer('managed_product_id')
       .notNull()
       .references(() => managedProducts.id),
-    wakeSku: text('wake_sku').notNull(),
     sourceUnit: text('source_unit', { enum: ['KG', 'MT'] }).notNull(),
     quantityPerSaleUnit: real('quantity_per_sale_unit').notNull(),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
@@ -121,7 +125,6 @@ export const productSaleUnitConfig = sqliteTable(
   },
   (t) => ({
     managedProductIdIdx: index('product_sale_unit_config_managed_product_id_idx').on(t.managedProductId),
-    wakeSkuIdx: index('product_sale_unit_config_wake_sku_idx').on(t.wakeSku),
     // No maximo 1 config ATIVA por produto -- evita duas configs conflitantes
     // pro mesmo managed_product_id (ver §10). Desativar a antiga antes de
     // ativar uma nova, nunca duas ativas ao mesmo tempo.
@@ -129,6 +132,10 @@ export const productSaleUnitConfig = sqliteTable(
       .on(t.managedProductId)
       .where(sql`${t.active} = 1`),
     quantityPositiveCheck: check('product_sale_unit_config_quantity_positive', sql`${t.quantityPerSaleUnit} > 0`),
+    // BLOQUEIO A (FASE B.2): antes so o enum TypeScript acima restringia
+    // source_unit a KG/MT -- sem CHECK no SQL, uma insercao direta (fora do
+    // Drizzle, ex: script solto/import futuro) podia gravar qualquer texto.
+    sourceUnitCheck: check('product_sale_unit_config_source_unit_check', sql`${t.sourceUnit} IN ('KG', 'MT')`),
   }),
 )
 

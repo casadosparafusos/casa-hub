@@ -219,7 +219,6 @@ describe('runSync -- integracao com UnitStrategies (§13/§14/§16)', () => {
     const product = await insertProduct({ wakeSku: 'SKU-KG-CFG' })
     await db.insert(schema.productSaleUnitConfig).values({
       managedProductId: product.id,
-      wakeSku: product.wakeSku,
       sourceUnit: 'KG',
       quantityPerSaleUnit: 5,
       active: true,
@@ -368,16 +367,75 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     expect(state?.calculatedWakeSpecialPrice).toBe(2.88)
     expect(state?.lastAppliedWakeSpecialPrice).toBe(2.88)
   })
+
+  it('PACKAGE_MEASURED (KG) com config ativa, escrita real: payload do Wake so tem preco/estoque normal, nunca tabela-74-fixador/wholesalePrice/promocao-100 (BLOQUEIO C)', async () => {
+    // Completa a matriz de cobertura do BLOQUEIO C (FASE B.2 §4): DIRECT e
+    // HUNDRED+FIXADOR_CENTO ja provados acima com escrita real; falta
+    // PACKAGE_MEASURED com config ativa (o unico outro caminho que produz
+    // ok:true e chega ate os escritores Wake reais). Preco 10/kg * 5kg/config
+    // = 50 (preco normal, NAO e wholesale de FIXADOR_CENTO -- essa policy so
+    // se aplica a HUNDRED); estoque floor(17/5)=3.
+    const product = await insertProduct({ wakeSku: 'SKU-KG-CFG-WRITE' })
+    const variantId = Number(product.wakeProductVariantId)
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'KG',
+      quantityPerSaleUnit: 5,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 17, unitRaw: 'KG' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 50 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(mockUpdateWakePrices).toHaveBeenCalledTimes(1)
+    expect(mockUpdateWakePrices).toHaveBeenCalledWith([{ identificador: 'SKU-KG-CFG-WRITE', precoPor: 50 }])
+
+    expect(mockUpdateWakeStock).toHaveBeenCalledTimes(1)
+    expect(mockUpdateWakeStock).toHaveBeenCalledWith([
+      { identificador: 'SKU-KG-CFG-WRITE', listaEstoque: [{ produtoVarianteId: variantId, centroDistribuicaoId: 25, estoqueFisico: 3 }] },
+    ])
+
+    // Mesmo payload de tabela de preco que DIRECT/HUNDRED (so precoDe/precoPor
+    // derivados do preco normal, sem qualquer chave de wholesale/atacado ou
+    // condicao de quantidade minima -- FIXADOR_CENTO nunca e acoplada a
+    // PACKAGE_MEASURED).
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledWith(74, [{ sku: 'SKU-KG-CFG-WRITE', precoDe: moneyRound(50 * 1.3), precoPor: 50 }])
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+
+    const [priceTableCall] = mockAddWakePriceTableProducts.mock.calls
+    const priceTablePayload = JSON.stringify(priceTableCall)
+    expect(priceTablePayload).not.toMatch(/wholesale/i)
+    expect(priceTablePayload).not.toMatch(/promo/i)
+    expect(priceTablePayload).not.toMatch(/10365/)
+
+    expect(result.failedProducts).toBe(0)
+    expect(result.appliedProducts).toBe(3) // preco + tabela de preco + estoque
+    expect(result.status).toBe('success')
+
+    // Audit trail confirma que nao ha wholesale calculado/persistido pra
+    // este produto -- FIXADOR_CENTO nunca roda fora de HUNDRED.
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.calculatedWakeSpecialPrice).toBeNull()
+    expect(state?.lastAppliedWakeSpecialPrice).toBeNull()
+  })
 })
 
 describe('runSync -- linha de estoque ausente no CISS nunca vira DIRECT nem escrita silenciosa (FASE B.1, PROBLEMA 7)', () => {
-  it('produto sem NENHUM saldo ja registrado (noRecord=true): unitRaw vem null do CISS, fail-closed, zero escrita real no Wake', async () => {
+  it('produto sem NENHUM saldo ja registrado (noRecord=true): preco cai em UNSUPPORTED_UNIT, estoque cai em NO_STOCK_RECORD (BLOQUEIO E), zero escrita real no Wake', async () => {
     // Espelha fetchOneProductStock() em src/lib/ciss/stock.ts (linha 77):
     // quando o CISS responde 200 mas sem nenhuma linha pro produto, o
     // cliente devolve { stock: 0, noRecord: true, unitRaw: null } -- NUNCA
     // undefined (fetchStockForProducts sempre devolve 1 linha por produto
-    // pedido). Como unitRaw vem null, resolveUnit() falha e o motor NUNCA
-    // assume DIRECT/zero-stock silencioso so por causa do noRecord.
+    // pedido). syncPrices() nao trata noRecord especificamente: unitRaw vem
+    // null, resolveUnit() falha, cai em UNSUPPORTED_UNIT (igual UNIT
+    // desconhecida). syncStock() (BLOQUEIO E, FASE B.2) intercepta
+    // noRecord ANTES de tentar resolver a UNIT, gerando o status distinto
+    // NO_STOCK_RECORD -- o operador nao confunde mais "sem registro no ERP"
+    // com "UNIT nao reconhecida".
     const product = await insertProduct({ wakeSku: 'SKU-NORECORD' })
     mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 0, noRecord: true, unitRaw: null }])
@@ -389,12 +447,21 @@ describe('runSync -- linha de estoque ausente no CISS nunca vira DIRECT nem escr
     expect(result.status).toBe('failed')
 
     const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
-    expect(items.every((i) => i.status === 'failed')).toBe(true)
-    expect(items.every((i) => i.errorMessage?.includes('UNSUPPORTED_UNIT'))).toBe(true)
-    expect(items.every((i) => i.errorMessage?.includes('unit_raw=null'))).toBe(true)
+    const priceItem = items.find((i) => i.field === 'unit_price')
+    const stockItem = items.find((i) => i.field === 'stock')
+    expect(priceItem?.status).toBe('failed')
+    expect(priceItem?.errorMessage).toContain('UNSUPPORTED_UNIT')
+    expect(priceItem?.errorMessage).toContain('unit_raw=null')
+    expect(stockItem?.status).toBe('failed')
+    expect(stockItem?.errorMessage).toContain('Sem registro de estoque no ERP')
+    expect(stockItem?.errorMessage).not.toContain('UNSUPPORTED_UNIT')
 
     const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
-    expect(state?.unitResolutionStatus).toBe('UNSUPPORTED_UNIT')
+    // syncStock() roda depois de syncPrices() e e a ultima gravacao em
+    // sync_product_state pra este produto -- por isso o estado final
+    // reflete NO_STOCK_RECORD (o resultado do BLOQUEIO E), nao o
+    // UNSUPPORTED_UNIT que syncPrices() gravou primeiro.
+    expect(state?.unitResolutionStatus).toBe('NO_STOCK_RECORD')
     expect(state?.unitClass).toBeNull()
 
     expect(mockUpdateWakePrices).not.toHaveBeenCalled()

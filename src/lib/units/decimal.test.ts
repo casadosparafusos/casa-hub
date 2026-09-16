@@ -8,16 +8,45 @@ import { cleanNumber, moneyRound, safeFloor } from './decimal'
 // onde a engine de UNIT os usa (strategies.ts, commercial-policy.ts).
 
 describe('moneyRound -- 2 casas decimais, meio-para-cima, resistente a ruido de float', () => {
+  // BLOQUEIO D (FASE B.2, 16/09/2026): a abordagem anterior
+  // (`Math.round((value + Number.EPSILON) * 100) / 100`) foi considerada
+  // "suficiente" no relatorio B.1 sem prova mais forte -- e falhava em
+  // `10.075 -> 10.08` (devolvia 10.07), porque `10.075 * 100` ja arredonda
+  // pra `1007.4999999999999` em IEEE-754 ANTES do EPSILON conseguir
+  // compensar. A implementacao atual desloca a casa decimal via notacao
+  // exponencial em string (`Number(valor + 'e2')` / `Number(r + 'e-2')`)
+  // ao inves de multiplicar/dividir por 100 direto -- ver decimal.ts. Os 7
+  // casos abaixo sao exatamente os exigidos pela FASE B.2 §5.
   it('0.1 + 0.2 -> 0.3 (classico erro de ponto flutuante, 0.1+0.2 cru = 0.30000000000000004)', () => {
     expect(moneyRound(0.1 + 0.2)).toBe(0.3)
   })
 
-  it('1.005 -> 1.01 (1.005 cru em IEEE-754 e 1.00499999999999989..., +Number.EPSILON antes do round corrige pra cima)', () => {
+  it('0.1 * 3 -> 0.3 (0.1*3 cru = 0.30000000000000004)', () => {
+    expect(moneyRound(0.1 * 3)).toBe(0.3)
+  })
+
+  it('12.50 * 2.5 -> 31.25', () => {
+    expect(moneyRound(12.5 * 2.5)).toBe(31.25)
+  })
+
+  it('8 * 0.3 -> 2.4 (8*0.3 cru = 2.4000000000000004)', () => {
+    expect(moneyRound(8 * 0.3)).toBe(2.4)
+  })
+
+  it('1.005 -> 1.01 (1.005 cru em IEEE-754 e 1.00499999999999989...)', () => {
     expect(moneyRound(1.005)).toBe(1.01)
   })
 
-  it('2.675 -> 2.68 (mesma classe de erro que 1.005 -- +Number.EPSILON tambem corrige aqui)', () => {
+  it('2.675 -> 2.68 (2.675 cru em IEEE-754 e 2.67499999999999982...)', () => {
     expect(moneyRound(2.675)).toBe(2.68)
+  })
+
+  it('10.075 -> 10.08 (caso que a abordagem anterior com Number.EPSILON errava -- devolvia 10.07)', () => {
+    expect(moneyRound(10.075)).toBe(10.08)
+  })
+
+  it('1.255 -> 1.26', () => {
+    expect(moneyRound(1.255)).toBe(1.26)
   })
 
   it('2.005 -> 2.01 (soma real de preco x qty que bate no mesmo padrao de ruido, mas do lado que arredonda certo)', () => {
@@ -34,8 +63,9 @@ describe('moneyRound -- 2 casas decimais, meio-para-cima, resistente a ruido de 
     expect(moneyRound(0)).toBe(0)
   })
 
-  it('negativo: arredonda mantendo o sinal (nao usado hoje pela engine, mas a funcao e generica)', () => {
-    expect(moneyRound(-1.005)).toBe(-1)
+  it('negativo: meio-para-cima em magnitude, sinal preservado (nao usado hoje pela engine, mas a funcao e generica)', () => {
+    expect(moneyRound(-1.005)).toBe(-1.01)
+    expect(moneyRound(-10.075)).toBe(-10.08)
   })
 })
 
