@@ -1,5 +1,19 @@
 # CHANGELOG — documentação
 
+## v8 — 16/09/2026
+
+FASE B.2 (`feat/unit-strategies`): final hardening, fecha os 5 bloqueios (A-E) apontados na revisão do relatório da FASE B.1. Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS. Ver detalhes em `STATUS.md`.
+
+Mudanças:
+- **BLOQUEIO A**: `product_sale_unit_config.source_unit` ganhou CHECK real em SQL (`IN ('KG','MT')`), não só no tipo TS — migration `drizzle/0004_public_betty_brant.sql`;
+- **BLOQUEIO B**: coluna `wake_sku` removida de `product_sale_unit_config` (denormalizada, podia divergir sem erro) — mesma migration; SKU só resolvível via JOIN com `managed_products`;
+- **BLOQUEIO C**: novo teste de integração de escrita real (`dryRun:false`) pra PACKAGE_MEASURED (KG) com config ativa, provando por regex no payload que nenhuma chave de atacado/promoção/tabela-74-fixador vaza fora de produtos `CT`;
+- **BLOQUEIO D**: `src/lib/units/decimal.ts` — `moneyRound` reescrito (notação exponencial em string em vez de `Number.EPSILON`); corrige bug real (`10.075` virava `10.07`, devia virar `10.08`); 12 testes de fronteira em `decimal.test.ts` (7 exigidos + negativo + casos adicionais);
+- **BLOQUEIO E**: `sync/engine.ts` — `syncStock()` intercepta `row?.noRecord` antes do cálculo, gravando `unit_resolution_status: 'NO_STOCK_RECORD'` (novo valor de enum) em vez do caminho morto `NO_RECORD_NOTE`;
+- revalidados os 4 nomes/defaults de `CommercialPolicyConfig` (`UNIT_PRICE_MARKUP_PERCENT`, `WHOLESALE_DISCOUNT_PERCENT`, `STOCK_PERCENT`, `WHOLESALE_MIN_QTY` = 20/20/10/100); confirmado que o módulo puro `commercial-policy.ts` nunca importa `settings.ts`; cobertura pré-existente já suficiente, nenhum teste novo necessário;
+- 397 testes no total (390 + 7 líquidos novos/ajustados); typecheck e build limpos; zero drift de `origin/main`; zero segredos/artefatos proibidos no diff;
+- **não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS**.
+
 ## v7 — 15/09/2026
 
 FASE B.1 (`feat/unit-strategies`): hardening da FASE B, mesma branch. Ver detalhes em `STATUS.md`.
