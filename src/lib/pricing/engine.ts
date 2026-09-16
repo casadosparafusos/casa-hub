@@ -8,13 +8,21 @@
 // removida por definicao da FASE B: a UNIT real vem do campo `unit` do CISS
 // (unitRaw), nunca inferida.
 //
-// wholesalePrice/wholesaleMinQty (preenchidos so pra HUNDRED, politica
-// FIXADOR_CENTO) sao campos de AUDITORIA nesta fase -- a Tabela de Preco no
-// Wake continua sendo alimentada pelo `retailPrice` (mesmo que o
-// reconciliador READ-ONLY ja faz: ver scripts/reconcile/rules.ts,
-// priceTableExpected = result.salePrice, NUNCA wholesalePrice). Nenhum
-// caminho de escrita real (src/lib/sync/engine.ts) consome wholesalePrice
-// hoje.
+// expectedWholesalePrice/wholesaleMinQty (preenchidos so pra HUNDRED,
+// politica FIXADOR_CENTO) sao campos de AUDITORIA nesta fase -- valor
+// ESPERADO/calculado pelo dominio, nunca efetivamente publicado em nenhum
+// endpoint da Wake (nem preco base, nem Tabela de Preco -- FASE B.4 §5). A
+// Wake possui mecanismos proprios de atacarejo/wholesale (listaAtacado,
+// Storefront prices.wholesalePrices) que permanecem fora deste write path;
+// ver docs/ARCHITECTURE_TARGET.md. Nenhum caminho de escrita real
+// (src/lib/sync/engine.ts) consome expectedWholesalePrice hoje -- so grava
+// em sync_product_state pra auditoria/comparacao futura (FASE C, READ-ONLY).
+//
+// `policy` (FASE B.4 §3) e a UNICA fonte de verdade pra decidir se um
+// produto pode participar de mecanismos comerciais de fixador (ex: Tabela de
+// Preco 74) -- nunca inferir isso de unitClass === 'HUNDRED' sozinho, pois
+// HUNDRED sem override de commercialPolicyOverride tambem pode navegar como
+// 'NONE' (ver resolveCommercialPolicy em src/lib/units/policy-resolver.ts).
 import { computeUnit, type CommercialPolicyConfig, type CommercialPolicyKind, type PackageSaleUnitConfig, type UnitClass, type UnitResolutionFailure } from '@/lib/units'
 
 export interface UnitPriceInput {
@@ -36,10 +44,12 @@ export type UnitPriceResult =
       unitRaw: string
       unitNormalized: string
       unitClass: UnitClass
+      /** Decisao comercial centralizada (resolveCommercialPolicy) -- gate oficial para mecanismos de fixador (ex: Tabela de Preco 74). Nunca usar unitClass === 'HUNDRED' como proxy disso. */
+      policy: CommercialPolicyKind
       /** Preco final de varejo no Wake -- unico valor usado nos caminhos de escrita (endpoint base e Tabela de Preco). */
       retailPrice: number
-      /** So auditoria nesta fase -- ver comentario acima. null quando a UNIT/politica nao define atacado. */
-      wholesalePrice: number | null
+      /** Valor de atacado ESPERADO/auditavel nesta fase -- ver comentario acima. NUNCA enviado a Wake na FASE B. null quando a UNIT/politica nao define atacado. */
+      expectedWholesalePrice: number | null
       wholesaleMinQty: number | null
     }
   | {
@@ -69,8 +79,9 @@ export function calculateUnitPrice(input: UnitPriceInput): UnitPriceResult {
     unitRaw: result.unitRaw,
     unitNormalized: result.unitNormalized,
     unitClass: result.unitClass,
+    policy: result.policy,
     retailPrice: result.salePrice,
-    wholesalePrice: result.wholesalePrice ?? null,
+    expectedWholesalePrice: result.wholesalePrice ?? null,
     wholesaleMinQty: result.wholesaleMinQty ?? null,
   }
 }

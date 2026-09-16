@@ -283,7 +283,7 @@ async function syncPrices(
   const toApplyUnitPrice: Array<{
     product: ManagedProduct
     unitPrice: number
-    wholesalePrice: number | null
+    expectedWholesalePrice: number | null
     sourceOldValue: number | null
     sourceNewValue: number
     targetOldValue: number | null
@@ -344,7 +344,11 @@ async function syncPrices(
     }
 
     const state = await getState(product.id)
-    const priceUnchanged = state?.lastAppliedWakeUnitPrice === priceResult.retailPrice && state?.lastAppliedWakeSpecialPrice === priceResult.wholesalePrice
+    // lastAppliedWakeSpecialPrice e coluna legada (nunca renomeada -- FASE
+    // B.4 §5, evitar migration sem ganho imediato) que guarda
+    // expectedWholesalePrice pra fins de comparacao/auditoria; nunca reflete
+    // um valor de fato enviado a Wake.
+    const priceUnchanged = state?.lastAppliedWakeUnitPrice === priceResult.retailPrice && state?.lastAppliedWakeSpecialPrice === priceResult.expectedWholesalePrice
 
     if (priceUnchanged) {
       skipped++
@@ -373,7 +377,7 @@ async function syncPrices(
         erpPrice: retailPrice,
         erpReadAt: new Date().toISOString(),
         calculatedWakeUnitPrice: priceResult.retailPrice,
-        calculatedWakeSpecialPrice: priceResult.wholesalePrice,
+        calculatedWakeSpecialPrice: priceResult.expectedWholesalePrice,
         ...unitFields,
       })
 
@@ -381,7 +385,7 @@ async function syncPrices(
         toApplyUnitPrice.push({
           product,
           unitPrice: priceResult.retailPrice,
-          wholesalePrice: priceResult.wholesalePrice,
+          expectedWholesalePrice: priceResult.expectedWholesalePrice,
           sourceOldValue,
           sourceNewValue: retailPrice,
           targetOldValue,
@@ -393,7 +397,16 @@ async function syncPrices(
     // De = Preco Por + 30% (ficticio, so pra exibir desconto). Compara
     // contra o que JA ESTA no Wake (tableEntries), nao contra nosso estado
     // local -- por isso roda mesmo quando priceUnchanged acima.
-    if (tableEntries) {
+    //
+    // FASE B.4 §3 (BLOQUEIO PRINCIPAL): o gate NAO pode ser so "existe
+    // WAKE_PRICE_TABLE_ID configurado" (tableEntries !== null) -- isso
+    // aplicava a Tabela 74 a QUALQUER produto/UNIT, vazando o mecanismo de
+    // FIXADOR_CENTO (CT >= 100) pra DIRECT/KG/MT por acidente. O gate real e
+    // a decisao comercial centralizada (`priceResult.policy`, vinda de
+    // resolveCommercialPolicy() via computeUnit() -- ver
+    // src/lib/units/policy-resolver.ts), nunca `unitClass === 'HUNDRED'`
+    // isolado: CT com commercialPolicyOverride='NONE' tambem fica de fora.
+    if (tableEntries && priceResult.policy === 'FIXADOR_CENTO') {
       const targetPrecoPor = priceResult.retailPrice
       const targetPrecoDe = moneyRound(targetPrecoPor * (1 + TABLE_FAKE_DISCOUNT_PERCENT / 100))
       const current = tableEntries.get(product.wakeSku)
@@ -462,7 +475,7 @@ async function syncPrices(
 
         if (verified) {
           applied++
-          await upsertState(b.product.id, { lastAppliedWakeUnitPrice: b.unitPrice, lastAppliedWakeSpecialPrice: b.wholesalePrice, lastAppliedAt: new Date().toISOString(), lastSyncRunId: syncRunId })
+          await upsertState(b.product.id, { lastAppliedWakeUnitPrice: b.unitPrice, lastAppliedWakeSpecialPrice: b.expectedWholesalePrice, lastAppliedAt: new Date().toISOString(), lastSyncRunId: syncRunId })
           await logItem({
             syncRunId,
             managedProductId: b.product.id,

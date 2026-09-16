@@ -82,6 +82,51 @@ O mesmo core deve aceitar:
 
 Não duplicar regra em uma rota especial.
 
+## Roteamento comercial — Tabela de Preço 74 vs atacarejo nativo Wake (FASE B.4, 16/09/2026)
+
+Três mecanismos comerciais distintos, nunca confundir:
+
+```text
+1. preço base/varejo do produto        -- endpoint padrão de preço da Wake
+2. Tabela de Preço 74                  -- mecanismo próprio deste app (precoDe fictício)
+3. atacarejo/promoção por quantidade   -- mecanismo nativo da Wake (listaAtacado / promoção 10365)
+```
+
+**Gate da Tabela 74** (`src/lib/sync/engine.ts`, `syncPrices()`, linha ~409): os writers `addWakePriceTableProducts`/`updateWakePriceTableProducts` só são chamados quando `priceResult.policy === 'FIXADOR_CENTO'` — nunca apenas porque `WAKE_PRICE_TABLE_ID` está configurado, e nunca apenas porque `unitClass === 'HUNDRED'` (um `CT` pode navegar como `policy: 'NONE'` via `commercialPolicyOverride`, ver `resolveCommercialPolicy` em `src/lib/units/policy-resolver.ts`). `policy` é a única fonte de verdade — `UnitPriceResult.policy` (`src/lib/pricing/engine.ts`), originada em `computeUnit()`.
+
+Rotas por UNIT (escopo atual):
+
+```text
+CT + FIXADOR_CENTO      -> participa da Tabela 74
+DIRECT                  -> NÃO participa
+PACKAGE_MEASURED (KG)   -> NÃO participa
+PACKAGE_MEASURED (MT)   -> NÃO participa
+CT + NoCommercialPolicy -> NÃO participa
+```
+
+O `precoDe` da Tabela 74 é **fictício** (`retailPrice * 1.30`, constante `TABLE_FAKE_DISCOUNT_PERCENT` em `sync/engine.ts`) e fica isolado a esse mecanismo — nunca entra no payload base enviado a `updateWakePrices`.
+
+**Semântica de `expectedWholesalePrice`** (`UnitPriceResult.expectedWholesalePrice`, `src/lib/pricing/engine.ts`, renomeado de `wholesalePrice` na FASE B.4): valor de atacado **esperado/calculado pelo domínio** para produtos `FIXADOR_CENTO`, usado hoje só para auditoria/comparação futura — **nenhum caminho de escrita real (`sync/engine.ts`) o publica na Wake nesta fase**. Colunas legadas no banco (`calculatedWakeSpecialPrice`, `lastAppliedWakeSpecialPrice`) mantêm o nome antigo de propósito (renomear exigiria migration sem ganho imediato nesta rodada) — tratá-las como legado, não como fonte de verdade do domínio.
+
+O comportamento real de atacarejo (>=100 unidades) hoje depende inteiramente do que já está configurado na Wake nativamente (promoção 10365 e/ou `listaAtacado`) — **não** do `expectedWholesalePrice` calculado aqui. Isso será validado READ-ONLY na FASE C, nunca escrito nesta fase.
+
+**Mecanismos nativos Wake — referência arquitetural (sem writes)**:
+- endpoint de preço base (`updateWakePrices`): preço/estoque padrão por SKU;
+- Tabela de Preço (`getWakePriceTableProducts`/`add`/`updateWakePriceTableProducts`, ID 74 neste ambiente): mecanismo específico deste app, usa `precoDe`/`precoPor`, gatilhado só por `policy === 'FIXADOR_CENTO'`;
+- `listaAtacado` no produto Wake (`precoPor` + `quantidade`) e consulta específica de atacarejo por produto — mecanismo nativo de tier de quantidade, **não escrito por este app**;
+- Storefront `prices.wholesalePrices` — exposição pro cliente final do atacarejo nativo, **não escrito por este app**;
+- promoção 10365 (`WAKE_PROMOTION_ID`): hoje só usada como settings/gate de UI, **nunca referenciada em write real**; semântica completa (condição 4, ação 2, escopo) ainda `UNVERIFIED` (ver `RECONCILIATION_READONLY.md`) — não alterada nesta fase.
+
+### Pendência explícita FASE C (READ-ONLY, antes de qualquer remediation/write)
+
+```text
+- ler promoção 10365 (condição/ativo/vigência/percentual/escopo);
+- ler atacarejo real (listaAtacado) dos SKUs de controle;
+- comparar Storefront prices.wholesalePrices/tier quando aplicável;
+- validar checkout 1/99/100/101 em janela aprovada;
+- só então decidir remediation/write, com aprovação explícita separada.
+```
+
 ## Realtime
 
 POST manual:

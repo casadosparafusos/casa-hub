@@ -77,6 +77,38 @@ vi.mock('../wake/client', async () => {
   }
 })
 
+// FASE B.4 §3/§4: nao existe campo de commercialPolicyOverride por produto
+// no banco ainda (ver src/lib/units/compute.ts) -- entao "CT +
+// NoCommercialPolicy" so e alcancavel via runSync() interceptando
+// calculateUnitPrice() neste ponto. `unitPriceOverride`, quando setado por um
+// teste, recebe o input original + o resultado default (calculado pela
+// implementacao REAL, capturada 1x via importActual) e pode recalcular com
+// commercialPolicyOverride pra simular o override que o banco ainda nao
+// persiste -- nunca so troca o campo `policy` isolado, senao retailPrice
+// ficaria inconsistente (markup de FIXADOR_CENTO sem a policy real). O gate
+// exercitado em sync/engine.ts (`priceResult.policy === 'FIXADOR_CENTO'`)
+// continua sendo o codigo de producao real; so a origem da policy e
+// substituida.
+type CalcInput = Parameters<typeof import('../pricing/engine').calculateUnitPrice>[0]
+type CalcResult = ReturnType<typeof import('../pricing/engine').calculateUnitPrice>
+type UnitPriceOverride = (input: CalcInput, defaultResult: CalcResult) => CalcResult
+let unitPriceOverride: UnitPriceOverride | null = null
+// Exposto pra testes recalcularem com um input diferente (ex:
+// commercialPolicyOverride) sem passar pelo wrapper mockado abaixo --
+// evita recursao caso o override chame calculateUnitPrice() de novo.
+let actualCalculateUnitPrice: typeof import('../pricing/engine').calculateUnitPrice
+vi.mock('../pricing/engine', async () => {
+  const actual = await vi.importActual<typeof import('../pricing/engine')>('../pricing/engine')
+  actualCalculateUnitPrice = actual.calculateUnitPrice
+  return {
+    ...actual,
+    calculateUnitPrice: (input: CalcInput) => {
+      const result = actual.calculateUnitPrice(input)
+      return unitPriceOverride ? unitPriceOverride(input, result) : result
+    },
+  }
+})
+
 let db: typeof import('../db').db
 let schema: typeof import('../db').schema
 let runSync: typeof import('./engine').runSync
@@ -125,6 +157,7 @@ beforeEach(async () => {
   mockGetWakePriceTableProducts.mockReset().mockResolvedValue([])
   mockAddWakePriceTableProducts.mockReset().mockResolvedValue(undefined)
   mockUpdateWakePriceTableProducts.mockReset().mockResolvedValue(undefined)
+  unitPriceOverride = null
 
   // Os 5 REQUIRED_UNCONFIRMED_KEYS (ver src/lib/settings.ts) -- so
   // necessarios pra dryRun:false passar por checkRequiredUnconfirmed() sem
@@ -290,7 +323,7 @@ describe('runSync -- integracao com UnitStrategies (§13/§14/§16)', () => {
 })
 
 describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', () => {
-  it('DIRECT (PC), escrita real: payload do Wake nunca carrega campo de atacado', async () => {
+  it('DIRECT (PC), escrita real: payload do Wake nunca carrega campo de atacado; Tabela 74 NAO e escrita (FASE B.4 §3 -- DIRECT nao tem CommercialPolicy=FIXADOR_CENTO)', async () => {
     const product = await insertProduct({ wakeSku: 'SKU-PC-WRITE' })
     const variantId = Number(product.wakeProductVariantId)
     mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 12.5]]))
@@ -308,12 +341,16 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
       { identificador: 'SKU-PC-WRITE', listaEstoque: [{ produtoVarianteId: variantId, centroDistribuicaoId: 25, estoqueFisico: 7 }] },
     ])
 
-    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
-    expect(mockAddWakePriceTableProducts).toHaveBeenCalledWith(74, [{ sku: 'SKU-PC-WRITE', precoDe: moneyRound(12.5 * 1.3), precoPor: 12.5 }])
+    // FASE B.4 §3 (BLOQUEIO PRINCIPAL): antes, addWakePriceTableProducts era
+    // chamado pra QUALQUER produto so porque WAKE_PRICE_TABLE_ID existia.
+    // Agora o gate e priceResult.policy === 'FIXADOR_CENTO' -- DIRECT nunca
+    // recebe essa policy (resolveCommercialPolicy('DIRECT') = 'NONE'), entao
+    // a Tabela 74 fica de fora.
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
     expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
 
     expect(result.failedProducts).toBe(0)
-    expect(result.appliedProducts).toBe(3) // preco + tabela de preco + estoque
+    expect(result.appliedProducts).toBe(2) // preco + estoque (Tabela 74 nao participa)
     expect(result.status).toBe('success')
   })
 
@@ -368,7 +405,7 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     expect(state?.lastAppliedWakeSpecialPrice).toBe(2.88)
   })
 
-  it('PACKAGE_MEASURED (KG) com config ativa, escrita real: payload do Wake so tem preco/estoque normal, nunca tabela-74-fixador/wholesalePrice/promocao-100 (BLOQUEIO C)', async () => {
+  it('PACKAGE_MEASURED (KG) com config ativa, escrita real: payload do Wake so tem preco/estoque normal, Tabela 74 NAO e escrita (FASE B.4 §3 -- KG nao tem CommercialPolicy=FIXADOR_CENTO)', async () => {
     // Completa a matriz de cobertura do BLOQUEIO C (FASE B.2 §4): DIRECT e
     // HUNDRED+FIXADOR_CENTO ja provados acima com escrita real; falta
     // PACKAGE_MEASURED com config ativa (o unico outro caminho que produz
@@ -398,22 +435,15 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
       { identificador: 'SKU-KG-CFG-WRITE', listaEstoque: [{ produtoVarianteId: variantId, centroDistribuicaoId: 25, estoqueFisico: 3 }] },
     ])
 
-    // Mesmo payload de tabela de preco que DIRECT/HUNDRED (so precoDe/precoPor
-    // derivados do preco normal, sem qualquer chave de wholesale/atacado ou
-    // condicao de quantidade minima -- FIXADOR_CENTO nunca e acoplada a
-    // PACKAGE_MEASURED).
-    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
-    expect(mockAddWakePriceTableProducts).toHaveBeenCalledWith(74, [{ sku: 'SKU-KG-CFG-WRITE', precoDe: moneyRound(50 * 1.3), precoPor: 50 }])
+    // FASE B.4 §3 (BLOQUEIO PRINCIPAL): PACKAGE_MEASURED (KG) nunca recebe
+    // policy=FIXADOR_CENTO (resolveCommercialPolicy so se aplica a HUNDRED),
+    // entao a Tabela 74 fica de fora -- mesmo com WAKE_PRICE_TABLE_ID
+    // configurado.
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
     expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
 
-    const [priceTableCall] = mockAddWakePriceTableProducts.mock.calls
-    const priceTablePayload = JSON.stringify(priceTableCall)
-    expect(priceTablePayload).not.toMatch(/wholesale/i)
-    expect(priceTablePayload).not.toMatch(/promo/i)
-    expect(priceTablePayload).not.toMatch(/10365/)
-
     expect(result.failedProducts).toBe(0)
-    expect(result.appliedProducts).toBe(3) // preco + tabela de preco + estoque
+    expect(result.appliedProducts).toBe(2) // preco + estoque (Tabela 74 nao participa)
     expect(result.status).toBe('success')
 
     // Audit trail confirma que nao ha wholesale calculado/persistido pra
@@ -421,6 +451,74 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
     expect(state?.calculatedWakeSpecialPrice).toBeNull()
     expect(state?.lastAppliedWakeSpecialPrice).toBeNull()
+  })
+
+  it('PACKAGE_MEASURED (MT) com config ativa, escrita real: Tabela 74 NAO e escrita (FASE B.4 §3/§4 -- MT nao tem CommercialPolicy=FIXADOR_CENTO)', async () => {
+    // Espelha o teste de KG acima -- prova que a exclusao da Tabela 74 vale
+    // pra PACKAGE_MEASURED como um todo (nao so pra KG especificamente).
+    // Preco 8/m * 4m/config = 32; estoque floor(9/4)=2.
+    const product = await insertProduct({ wakeSku: 'SKU-MT-CFG-WRITE' })
+    const variantId = Number(product.wakeProductVariantId)
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'MT',
+      quantityPerSaleUnit: 4,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 8]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 9, unitRaw: 'MT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 32 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(mockUpdateWakePrices).toHaveBeenCalledTimes(1)
+    expect(mockUpdateWakePrices).toHaveBeenCalledWith([{ identificador: 'SKU-MT-CFG-WRITE', precoPor: 32 }])
+
+    expect(mockUpdateWakeStock).toHaveBeenCalledTimes(1)
+    expect(mockUpdateWakeStock).toHaveBeenCalledWith([
+      { identificador: 'SKU-MT-CFG-WRITE', listaEstoque: [{ produtoVarianteId: variantId, centroDistribuicaoId: 25, estoqueFisico: 2 }] },
+    ])
+
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+
+    expect(result.failedProducts).toBe(0)
+    expect(result.appliedProducts).toBe(2) // preco + estoque (Tabela 74 nao participa)
+    expect(result.status).toBe('success')
+  })
+
+  it('HUNDRED (CT) + commercialPolicyOverride=NONE, escrita real: Tabela 74 NAO e escrita mesmo sendo HUNDRED (FASE B.4 §3/§4 -- gate e policy, nunca unitClass sozinho)', async () => {
+    // Prova o requisito mais sutil do §3: o gate NAO pode ser
+    // unitClass === 'HUNDRED'. Precisa ser a decisao comercial centralizada
+    // (priceResult.policy). Hoje nao existe campo de override por produto no
+    // banco (ver src/lib/units/compute.ts, comentario sobre ausencia dessa
+    // coluna) -- entao simulamos aqui, no nivel de integracao, via
+    // unitPriceOverride (ver vi.mock('../pricing/engine') no topo do
+    // arquivo), forcando policy='NONE' pra este produto especifico. O gate
+    // exercitado (`priceResult.policy === 'FIXADOR_CENTO'` em
+    // sync/engine.ts) e o codigo de producao de verdade; so a origem da
+    // policy e substituida.
+    unitPriceOverride = (input, result) => (result.ok && result.unitClass === 'HUNDRED' ? actualCalculateUnitPrice({ ...input, commercialPolicyOverride: 'NONE' }) : result)
+
+    const product = await insertProduct({ wakeSku: 'SKU-CT-NOPOLICY-WRITE' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(mockUpdateWakePrices).toHaveBeenCalledTimes(1)
+    expect(mockUpdateWakePrices).toHaveBeenCalledWith([{ identificador: 'SKU-CT-NOPOLICY-WRITE', precoPor: 3 }])
+
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+
+    expect(result.failedProducts).toBe(0)
+    expect(result.appliedProducts).toBe(2) // preco + estoque (Tabela 74 nao participa)
+    expect(result.status).toBe('success')
   })
 })
 

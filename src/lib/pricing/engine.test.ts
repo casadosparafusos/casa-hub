@@ -12,8 +12,9 @@ describe('calculateUnitPrice', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.unitClass).toBe('HUNDRED')
+    expect(result.policy).toBe('FIXADOR_CENTO')
     expect(result.retailPrice).toBe(3.6) // (300 / 100) * 1.2
-    expect(result.wholesalePrice).toBe(2.88) // 3.6 * 0.8 -- auditoria, nao escrito no Wake
+    expect(result.expectedWholesalePrice).toBe(2.88) // 3.6 * 0.8 -- auditoria, nao escrito no Wake
     expect(result.wholesaleMinQty).toBe(100)
   })
 
@@ -23,8 +24,9 @@ describe('calculateUnitPrice', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.unitClass).toBe('DIRECT')
+    expect(result.policy).toBe('NONE')
     expect(result.retailPrice).toBe(12.5)
-    expect(result.wholesalePrice).toBeNull()
+    expect(result.expectedWholesalePrice).toBeNull()
   })
 
   // KG/MT (PACKAGE_MEASURED) -- preco por unidade de origem * quantidade
@@ -34,8 +36,9 @@ describe('calculateUnitPrice', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.unitClass).toBe('PACKAGE_MEASURED')
+    expect(result.policy).toBe('NONE')
     expect(result.retailPrice).toBe(50) // 10/kg * 5kg
-    expect(result.wholesalePrice).toBeNull()
+    expect(result.expectedWholesalePrice).toBeNull()
   })
 
   it('KG: sem config cadastrada, falha fail-closed com CONFIGURATION_REQUIRED', () => {
@@ -95,7 +98,7 @@ describe('calculateUnitPrice', () => {
     expect(withCustomDiscount.ok).toBe(true)
     if (!withCustomDiscount.ok) return
     expect(withCustomDiscount.retailPrice).toBe(3.6) // markup inalterado
-    expect(withCustomDiscount.wholesalePrice).toBe(2.52) // 3.6 * 0.7, nao 3.6 * 0.8
+    expect(withCustomDiscount.expectedWholesalePrice).toBe(2.52) // 3.6 * 0.7, nao 3.6 * 0.8
   })
 
   it('DIRECT: commercialPolicyConfig customizado nao afeta preco (politica so se aplica a HUNDRED)', () => {
@@ -106,7 +109,22 @@ describe('calculateUnitPrice', () => {
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
+    expect(result.policy).toBe('NONE')
     expect(result.retailPrice).toBe(12.5)
-    expect(result.wholesalePrice).toBeNull()
+    expect(result.expectedWholesalePrice).toBeNull()
+  })
+
+  // FASE B.4 §3/§4: CT + NoCommercialPolicy (override explicito pra 'NONE')
+  // -- prova que o campo `policy` exposto aqui (fonte de verdade pro gate da
+  // Tabela 74 em sync/engine.ts) reflete o override, mesmo em HUNDRED, e que
+  // isso desliga o calculo de atacado (nao so o write).
+  it('CT + NoCommercialPolicy (override): policy=NONE, sem markup/atacado mesmo sendo HUNDRED', () => {
+    const result = calculateUnitPrice({ unitRaw: 'CT', cissPrice: 300, commercialPolicyOverride: 'NONE' })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.unitClass).toBe('HUNDRED')
+    expect(result.policy).toBe('NONE')
+    expect(result.retailPrice).toBe(3) // 300/100, sem markup de FIXADOR_CENTO
+    expect(result.expectedWholesalePrice).toBeNull()
   })
 })

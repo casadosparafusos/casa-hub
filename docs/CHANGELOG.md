@@ -1,5 +1,17 @@
 # CHANGELOG — documentação
 
+## v9 — 16/09/2026
+
+FASE B.4 (`feat/unit-strategies`): correção final de roteamento comercial antes do Draft PR. Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS/alteração semântica da promoção 10365. Ver detalhes em `STATUS.md` e `ARCHITECTURE_TARGET.md` (seção "Roteamento comercial").
+
+Mudanças:
+- **BLOQUEIO PRINCIPAL**: `syncPrices()` (`src/lib/sync/engine.ts`) tinha o gate da Tabela de Preço 74 como `if (tableEntries)` — disparava os writers `addWakePriceTableProducts`/`updateWakePriceTableProducts` pra qualquer produto só porque `WAKE_PRICE_TABLE_ID` estava configurado, vazando o mecanismo de `FIXADOR_CENTO` pra DIRECT/KG/MT por acidente. Corrigido para `if (tableEntries && priceResult.policy === 'FIXADOR_CENTO')` — `policy` é a decisão comercial centralizada (`resolveCommercialPolicy`), nunca `unitClass === 'HUNDRED'` isolado (um `CT` sem policy override também não participa);
+- `UnitPriceResult.policy` (novo campo, `src/lib/pricing/engine.ts`): antes calculado por `computeUnit()` e descartado na fronteira do `pricing/engine.ts` — agora propagado e é a única fonte de verdade consumida pelo gate acima;
+- 5 cenários obrigatórios do writer da Tabela 74 cobertos por testes de integração reais com spies do Wake client (`src/lib/sync/engine.test.ts`): CT+FIXADOR_CENTO (pré-existente, confirmado correto), DIRECT (corrigido), KG com config válida (corrigido), MT com config válida (novo), CT+NoCommercialPolicy (novo, simulado via mock direcionado de `calculateUnitPrice` já que ainda não existe campo de override por produto no banco);
+- `UnitPriceResult.wholesalePrice` renomeado para `expectedWholesalePrice` (domínio) — deixa explícito que é valor esperado/calculado, nunca efetivamente publicado na Wake nesta fase; colunas legadas do banco (`calculatedWakeSpecialPrice`, `lastAppliedWakeSpecialPrice`) mantidas de propósito (renomear exigiria migration sem ganho imediato), documentadas como legado;
+- 401 testes no total (398 da FASE B.3 + 3 novos: 1 em `pricing/engine.test.ts` — CT+NoCommercialPolicy —, 2 em `sync/engine.test.ts` — MT com config e CT+NoCommercialPolicy —; os testes DIRECT e KG foram corrigidos/reescritos, não somam à contagem líquida); typecheck e build limpos; zero drift de `origin/main`;
+- **não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, promoção 10365 não alterada**.
+
 ## v8 — 16/09/2026
 
 FASE B.2 (`feat/unit-strategies`): final hardening, fecha os 5 bloqueios (A-E) apontados na revisão do relatório da FASE B.1. Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS. Ver detalhes em `STATUS.md`.
