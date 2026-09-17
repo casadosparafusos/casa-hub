@@ -54,20 +54,20 @@ function baseInput(products: ManagedProductRow[]): ReconcileInput {
 describe('reconcileProduct', () => {
   const p = product('100')
 
-  function withCento(precoPor: number | null, stockCd: number | null, tablePreco = 0.3): ReconcileInput {
+  function withHundred(precoPor: number | null, stockCd: number | null, tablePreco = 0.3): ReconcileInput {
     const input = baseInput([p])
     input.cissPrices!.set('100', 25)
-    input.cissStock!.set('100', stock('100', 'CENTO', 36.69))
+    input.cissStock!.set('100', stock('100', 'CT', 36.69))
     input.wakeProducts!.set(p.wakeSku, wake(p, precoPor, stockCd))
     input.wakeTable!.set(p.wakeSku, table(p, tablePreco))
     return input
   }
 
-  it('CENTO batendo = MATCH', () => {
-    const r = reconcileProduct(p, withCento(0.3, 366))
+  it('CT (HUNDRED) batendo = MATCH', () => {
+    const r = reconcileProduct(p, withHundred(0.3, 366))
     expect(r).toMatchObject({
       status: 'MATCH',
-      unit: 'CENTO',
+      unit: 'HUNDRED',
       ciss_price: 25,
       ciss_stock: 36.69,
       expected_retail_price: 0.3,
@@ -85,46 +85,55 @@ describe('reconcileProduct', () => {
   })
 
   it('mismatch de preco', () => {
-    const r = reconcileProduct(p, withCento(25, 366))
+    const r = reconcileProduct(p, withHundred(25, 366))
     expect(r.status).toBe('PRICE_MISMATCH')
     expect(r.price_match).toBe(false)
     expect(r.stock_match).toBe(true)
   })
 
   it('mismatch so na tabela de preco tambem e PRICE_MISMATCH', () => {
-    const r = reconcileProduct(p, withCento(0.3, 366, 0.5))
+    const r = reconcileProduct(p, withHundred(0.3, 366, 0.5))
     expect(r.status).toBe('PRICE_MISMATCH')
     expect(r.price_match).toBe(true)
     expect(r.price_table_match).toBe(false)
   })
 
   it('mismatch de estoque', () => {
-    const r = reconcileProduct(p, withCento(0.3, 3669))
+    const r = reconcileProduct(p, withHundred(0.3, 3669))
     expect(r.status).toBe('STOCK_MISMATCH')
     expect(r.stock_match).toBe(false)
   })
 
   it('mismatch de preco e estoque', () => {
-    expect(reconcileProduct(p, withCento(25, 36)).status).toBe('PRICE_AND_STOCK_MISMATCH')
+    expect(reconcileProduct(p, withHundred(25, 36)).status).toBe('PRICE_AND_STOCK_MISMATCH')
   })
 
-  it('PC: sem conversao de CENTO', () => {
+  it('PC (DIRECT): sem conversao de HUNDRED', () => {
     const input = baseInput([p])
     input.cissPrices!.set('100', 12.5)
     input.cissStock!.set('100', stock('100', 'PC', 7.9))
     input.wakeProducts!.set(p.wakeSku, wake(p, 12.5, 7))
     input.wakeTable!.set(p.wakeSku, table(p, 12.5))
     const r = reconcileProduct(p, input)
-    expect(r).toMatchObject({ status: 'MATCH', unit: 'PC', expected_retail_price: 12.5, expected_wholesale_price: null, expected_stock: 7 })
+    expect(r).toMatchObject({ status: 'MATCH', unit: 'DIRECT', expected_retail_price: 12.5, expected_wholesale_price: null, expected_stock: 7 })
   })
 
-  it('PC com a Wake no formato CENTO = PRICE_AND_STOCK_MISMATCH (nao aplica CENTO em PC)', () => {
+  it('PC com a Wake no formato HUNDRED = PRICE_AND_STOCK_MISMATCH (nao aplica FIXADOR_CENTO em DIRECT)', () => {
     const input = baseInput([p])
     input.cissPrices!.set('100', 12.5)
     input.cissStock!.set('100', stock('100', 'PC', 7))
     input.wakeProducts!.set(p.wakeSku, wake(p, 0.15, 70))
     input.wakeTable!.set(p.wakeSku, table(p, 0.15))
     expect(reconcileProduct(p, input).status).toBe('PRICE_AND_STOCK_MISMATCH')
+  })
+
+  it.each(['JG', 'PR', 'CJ', 'RL', 'KT', 'CX', 'LT', 'PL'])('%s tambem e DIRECT (1:1, sem conversao)', (raw) => {
+    const input = baseInput([p])
+    input.cissPrices!.set('100', 2.07)
+    input.cissStock!.set('100', stock('100', raw, 1894))
+    input.wakeProducts!.set(p.wakeSku, wake(p, 2.07, 1894))
+    input.wakeTable!.set(p.wakeSku, table(p, 2.07))
+    expect(reconcileProduct(p, input)).toMatchObject({ status: 'MATCH', unit: 'DIRECT', expected_stock: 1894 })
   })
 
   it('KG sem embalagem = CONFIGURATION_REQUIRED', () => {
@@ -145,6 +154,14 @@ describe('reconcileProduct', () => {
     input.wakeProducts!.set(p.wakeSku, wake(p, 150, 2))
     input.wakeTable!.set(p.wakeSku, table(p, 150))
     expect(reconcileProduct(p, input)).toMatchObject({ status: 'MATCH', package_weight_kg: 5, expected_stock: 2 })
+  })
+
+  it('MT sem embalagem = CONFIGURATION_REQUIRED', () => {
+    const input = baseInput([p])
+    input.cissPrices!.set('100', 10)
+    input.cissStock!.set('100', stock('100', 'MT', 50))
+    const r = reconcileProduct(p, input)
+    expect(r.status).toBe('CONFIGURATION_REQUIRED')
   })
 
   it('unit desconhecida = UNSUPPORTED_UNIT', () => {
@@ -175,7 +192,7 @@ describe('reconcileProduct', () => {
 
   it('CISS sem preco = CISS_MISSING', () => {
     const input = baseInput([p])
-    input.cissStock!.set('100', stock('100', 'CENTO', 10))
+    input.cissStock!.set('100', stock('100', 'CT', 10))
     expect(reconcileProduct(p, input).status).toBe('CISS_MISSING')
     input.cissPrices!.set('100', null)
     expect(reconcileProduct(p, input).error).toContain('retail_price null')
@@ -184,7 +201,7 @@ describe('reconcileProduct', () => {
   it('SKU fora da Wake = WAKE_MISSING', () => {
     const input = baseInput([p])
     input.cissPrices!.set('100', 25)
-    input.cissStock!.set('100', stock('100', 'CENTO', 10))
+    input.cissStock!.set('100', stock('100', 'CT', 10))
     const r = reconcileProduct(p, input)
     expect(r.status).toBe('WAKE_MISSING')
     expect(r.expected_retail_price).toBe(0.3)
@@ -193,7 +210,7 @@ describe('reconcileProduct', () => {
   it('leitura Wake abortada = ERROR (nunca WAKE_MISSING)', () => {
     const input = baseInput([p])
     input.cissPrices!.set('100', 25)
-    input.cissStock!.set('100', stock('100', 'CENTO', 10))
+    input.cissStock!.set('100', stock('100', 'CT', 10))
     input.wakeProducts = null
     input.wakeError = 'Wake respondeu 429'
     const r = reconcileProduct(p, input)
@@ -208,7 +225,7 @@ describe('reconcileProduct', () => {
   })
 
   it('tabela nao lida: price_table_match null, status decidido pelo resto', () => {
-    const input = withCento(0.3, 366)
+    const input = withHundred(0.3, 366)
     input.wakeTable = null
     input.tableError = 'Wake respondeu 404'
     const r = reconcileProduct(p, input)
@@ -218,7 +235,7 @@ describe('reconcileProduct', () => {
   })
 
   it('SKU ausente na tabela = price_table_match false', () => {
-    const input = withCento(0.3, 366)
+    const input = withHundred(0.3, 366)
     input.wakeTable = new Map()
     const r = reconcileProduct(p, input)
     expect(r.status).toBe('PRICE_MISMATCH')
@@ -226,7 +243,7 @@ describe('reconcileProduct', () => {
   })
 
   it('estoque Wake sem o campo estoque[] (no_field) = ERROR explicito, nunca STOCK_MISMATCH', () => {
-    const input = withCento(0.3, null)
+    const input = withHundred(0.3, null)
     input.wakeProducts!.set(p.wakeSku, wake(p, 0.3, null, 'no_field'))
     const r = reconcileProduct(p, input)
     expect(r.status).toBe('ERROR')
@@ -237,7 +254,7 @@ describe('reconcileProduct', () => {
   })
 
   it('estoque[] sem entrada do CD (no_cd_entry) = ERROR, nunca STOCK_MISMATCH', () => {
-    const r = reconcileProduct(p, withCento(25, null))
+    const r = reconcileProduct(p, withHundred(25, null))
     expect(r.status).toBe('ERROR')
     expect(r.stock_match).toBeNull()
     expect(r.price_match).toBe(false)
@@ -246,13 +263,13 @@ describe('reconcileProduct', () => {
   })
 
   it('estoqueFisico invalido (invalid_value) = ERROR', () => {
-    const input = withCento(0.3, null)
+    const input = withHundred(0.3, null)
     input.wakeProducts!.set(p.wakeSku, wake(p, 0.3, null, 'invalid_value'))
     expect(reconcileProduct(p, input)).toMatchObject({ status: 'ERROR', stock_match: null })
   })
 
   it('variant id divergente e anotado', () => {
-    const input = withCento(0.3, 366)
+    const input = withHundred(0.3, 366)
     input.wakeProducts!.set(p.wakeSku, { ...wake(p, 0.3, 366), variantId: 1 })
     expect(reconcileProduct(p, input).error).toContain('difere do cadastrado')
   })
@@ -267,7 +284,7 @@ describe('reconcileAll / agregados', () => {
     const e = product('5')
     const input = baseInput([a, b, c, d, e])
     input.cissPrices!.set('1', 25).set('2', 12.5).set('3', 30).set('4', 10)
-    input.cissStock!.set('1', stock('1', 'CENTO', 36.69))
+    input.cissStock!.set('1', stock('1', 'CT', 36.69))
     input.cissStock!.set('2', stock('2', 'PC', 7))
     input.cissStock!.set('3', stock('3', 'KG', 10))
     input.cissStock!.set('4', stock('4', 'XYZ', 1))
@@ -286,10 +303,9 @@ describe('reconcileAll / agregados', () => {
       ciss_no_stock_record: 1,
       wake_found: 2,
       wake_missing: 3,
-      unit_cento: 1,
-      unit_pc: 1,
-      unit_un: 0,
-      unit_kg: 1,
+      unit_hundred: 1,
+      unit_direct: 1,
+      unit_package_measured: 1,
       unit_unsupported: 1,
       unit_missing: 0,
       price_matches: 2,
@@ -301,7 +317,7 @@ describe('reconcileAll / agregados', () => {
       configuration_required: 1,
       errors: 0,
     })
-    expect(aggregates.unit_raw_distribution).toEqual({ CENTO: 1, PC: 1, KG: 1, XYZ: 1 })
+    expect(aggregates.unit_raw_distribution).toEqual({ CT: 1, PC: 1, KG: 1, XYZ: 1 })
     expect(aggregates.status_counts.MATCH).toBe(1)
   })
 
@@ -310,7 +326,7 @@ describe('reconcileAll / agregados', () => {
     const input = baseInput(ps)
     for (const x of ps) {
       input.cissPrices!.set(x.cissProductId, 25)
-      input.cissStock!.set(x.cissProductId, stock(x.cissProductId, 'CENTO', 10))
+      input.cissStock!.set(x.cissProductId, stock(x.cissProductId, 'CT', 10))
       input.wakeProducts!.set(x.wakeSku, wake(x, 0.3, null, 'no_field'))
       input.wakeTable!.set(x.wakeSku, table(x, 0.3))
     }
@@ -327,7 +343,7 @@ describe('reconcileAll / agregados', () => {
     const a = product('1')
     const input = baseInput([a])
     input.cissPrices!.set('1', 25)
-    input.cissStock!.set('1', stock('1', 'CENTO', 1))
+    input.cissStock!.set('1', stock('1', 'CT', 1))
     input.wakeProducts = null
     input.wakeError = '429'
     const { aggregates } = reconcileAll(input)

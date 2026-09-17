@@ -1,41 +1,130 @@
 import { describe, expect, it } from 'vitest'
-import { calculatePricing, moneyRound } from './engine'
+import { calculateUnitPrice } from './engine'
 
-describe('moneyRound', () => {
-  it('arredonda pra 2 casas decimais', () => {
-    expect(moneyRound(10.005)).toBe(10.01) // meio-para-cima, evita erro de ponto flutuante
-    expect(moneyRound(9.999)).toBe(10)
-    expect(moneyRound(5)).toBe(5)
-  })
-})
-
-describe('calculatePricing', () => {
-  const rules = { unitPriceMarkupPercent: 20, wholesaleMinQty: 100 }
-
-  // O preco bruto do CISS/PODER e o preco DO CENTO (100 unidades), nao o
-  // preco unitario -- confirmado pelo usuario em 08/09/2026 com um caso real
-  // (BELENUS 1563: preco de cento no CISS 290.83 -> preco unitario ja com
-  // markup no site R$3,49). Por isso o motor divide por 100 antes do markup.
-  it('divide por 100 (preco de cento -> unitario) e aplica markup de 20%', () => {
-    const result = calculatePricing(300, rules)
-    expect(result.wakeUnitPrice).toBe(3.6) // (300 / 100) * 1.2
+describe('calculateUnitPrice', () => {
+  // CT (HUNDRED) -- preco bruto do CISS e o preco DO CENTO (100 unidades),
+  // nao o preco unitario -- confirmado pelo usuario em 08/09/2026 com um
+  // caso real (BELENUS 1563: preco de cento no CISS 290.83 -> preco
+  // unitario ja com markup no site R$3,49). Politica FIXADOR_CENTO: /100,
+  // +20% varejo, -20% sobre o varejo pro atacado (auditoria, nao escrito).
+  it('CT: divide por 100 (preco de cento -> unitario) e aplica markup de 20%', () => {
+    const result = calculateUnitPrice({ unitRaw: 'CT', cissPrice: 300 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.unitClass).toBe('HUNDRED')
+    expect(result.policy).toBe('FIXADOR_CENTO')
+    expect(result.retailPrice).toBe(3.6) // (300 / 100) * 1.2
+    expect(result.expectedWholesalePrice).toBe(2.88) // 3.6 * 0.8 -- auditoria, nao escrito no Wake
+    expect(result.wholesaleMinQty).toBe(100)
   })
 
-  it('preco de cento e igual ao preco bruto do ERP, sem markup', () => {
-    const result = calculatePricing(300, rules)
-    expect(result.wakeSpecialPrice).toBe(300)
+  // PC/UN/etc (DIRECT) -- 1:1, sem divisao por 100 nem markup.
+  it('PC: preco 1:1, sem markup nem divisao por cento', () => {
+    const result = calculateUnitPrice({ unitRaw: 'PC', cissPrice: 12.5 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.unitClass).toBe('DIRECT')
+    expect(result.policy).toBe('NONE')
+    expect(result.retailPrice).toBe(12.5)
+    expect(result.expectedWholesalePrice).toBeNull()
   })
 
-  it('preserva o preco de origem sem alteracao, pra auditoria', () => {
-    const result = calculatePricing(7.5, rules)
-    expect(result.sourceRetailPrice).toBe(7.5)
+  // KG/MT (PACKAGE_MEASURED) -- preco por unidade de origem * quantidade
+  // configurada por produto (product_sale_unit_config).
+  it('KG: com config cadastrada, multiplica preco por kg pela quantidade por unidade de venda', () => {
+    const result = calculateUnitPrice({ unitRaw: 'KG', cissPrice: 10, packageConfig: { quantityPerSaleUnit: 5 } })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.unitClass).toBe('PACKAGE_MEASURED')
+    expect(result.policy).toBe('NONE')
+    expect(result.retailPrice).toBe(50) // 10/kg * 5kg
+    expect(result.expectedWholesalePrice).toBeNull()
   })
 
-  it('rejeita preco negativo', () => {
-    expect(() => calculatePricing(-1, rules)).toThrow()
+  it('KG: sem config cadastrada, falha fail-closed com CONFIGURATION_REQUIRED', () => {
+    const result = calculateUnitPrice({ unitRaw: 'KG', cissPrice: 10 })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('CONFIGURATION_REQUIRED')
+  })
+
+  it('UNIT desconhecida: falha fail-closed com UNSUPPORTED_UNIT, nunca assume DIRECT', () => {
+    const result = calculateUnitPrice({ unitRaw: 'XYZ', cissPrice: 10 })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('UNSUPPORTED_UNIT')
+  })
+
+  it('UNIT ausente: falha fail-closed com UNSUPPORTED_UNIT', () => {
+    const result = calculateUnitPrice({ unitRaw: null, cissPrice: 10 })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('UNSUPPORTED_UNIT')
+  })
+
+  it('rejeita preco negativo (corrupcao numerica genuina, nao fluxo de negocio)', () => {
+    expect(() => calculateUnitPrice({ unitRaw: 'PC', cissPrice: -1 })).toThrow()
   })
 
   it('rejeita preco nao finito', () => {
-    expect(() => calculatePricing(Number.NaN, rules)).toThrow()
+    expect(() => calculateUnitPrice({ unitRaw: 'PC', cissPrice: Number.NaN })).toThrow()
+  })
+
+  // FASE B.1 (PROBLEMA 1): prova que commercialPolicyConfig (settings via
+  // src/lib/settings.ts#getCommercialPolicyConfig, injetado por
+  // src/lib/sync/engine.ts) realmente afeta o resultado -- nao fica so
+  // aceito na assinatura e ignorado no calculo.
+  it('CT: markup de settings (30%) muda o retailPrice em vez do default (20%)', () => {
+    const withDefault = calculateUnitPrice({ unitRaw: 'CT', cissPrice: 300 })
+    const withCustomMarkup = calculateUnitPrice({
+      unitRaw: 'CT',
+      cissPrice: 300,
+      commercialPolicyConfig: { markupPercent: 30, wholesaleDiscountPercent: 20, stockExposurePercent: 10, wholesaleMinQty: 100 },
+    })
+    expect(withDefault.ok).toBe(true)
+    expect(withCustomMarkup.ok).toBe(true)
+    if (!withDefault.ok || !withCustomMarkup.ok) return
+    expect(withDefault.retailPrice).toBe(3.6) // (300/100) * 1.2
+    expect(withCustomMarkup.retailPrice).toBe(3.9) // (300/100) * 1.3
+    expect(withCustomMarkup.retailPrice).not.toBe(withDefault.retailPrice)
+  })
+
+  it('CT: desconto de atacado de settings (30%) muda o wholesalePrice em vez do default (20%)', () => {
+    const withCustomDiscount = calculateUnitPrice({
+      unitRaw: 'CT',
+      cissPrice: 300,
+      commercialPolicyConfig: { markupPercent: 20, wholesaleDiscountPercent: 30, stockExposurePercent: 10, wholesaleMinQty: 100 },
+    })
+    expect(withCustomDiscount.ok).toBe(true)
+    if (!withCustomDiscount.ok) return
+    expect(withCustomDiscount.retailPrice).toBe(3.6) // markup inalterado
+    expect(withCustomDiscount.expectedWholesalePrice).toBe(2.52) // 3.6 * 0.7, nao 3.6 * 0.8
+  })
+
+  it('DIRECT: commercialPolicyConfig customizado nao afeta preco (politica so se aplica a HUNDRED)', () => {
+    const result = calculateUnitPrice({
+      unitRaw: 'PC',
+      cissPrice: 12.5,
+      commercialPolicyConfig: { markupPercent: 99, wholesaleDiscountPercent: 99, stockExposurePercent: 99, wholesaleMinQty: 1 },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.policy).toBe('NONE')
+    expect(result.retailPrice).toBe(12.5)
+    expect(result.expectedWholesalePrice).toBeNull()
+  })
+
+  // FASE B.4 §3/§4: CT + NoCommercialPolicy (override explicito pra 'NONE')
+  // -- prova que o campo `policy` exposto aqui (fonte de verdade pro gate da
+  // Tabela 74 em sync/engine.ts) reflete o override, mesmo em HUNDRED, e que
+  // isso desliga o calculo de atacado (nao so o write).
+  it('CT + NoCommercialPolicy (override): policy=NONE, sem markup/atacado mesmo sendo HUNDRED', () => {
+    const result = calculateUnitPrice({ unitRaw: 'CT', cissPrice: 300, commercialPolicyOverride: 'NONE' })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.unitClass).toBe('HUNDRED')
+    expect(result.policy).toBe('NONE')
+    expect(result.retailPrice).toBe(3) // 300/100, sem markup de FIXADOR_CENTO
+    expect(result.expectedWholesalePrice).toBeNull()
   })
 })

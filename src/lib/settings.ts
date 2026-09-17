@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from './db'
 import { decryptSecret, encryptSecret } from './crypto/secret-box'
 import { SECRET_KEYS, type SecretKey } from './settings-shared'
+import type { CommercialPolicyConfig } from './units'
 
 export { SECRET_KEYS }
 export type { SecretKey }
@@ -32,6 +33,11 @@ export type RequiredUnconfirmedKey = (typeof REQUIRED_UNCONFIRMED_KEYS)[number]
 
 export const RULE_DEFAULTS = {
   UNIT_PRICE_MARKUP_PERCENT: 20,
+  // Adicionado na FASE B.1 (PROBLEMA 1): faltava o 4o parametro da
+  // FIXADOR_CENTO (desconto do atacado sobre o varejo) como setting -- os
+  // outros 3 (markup/estoque/qty minima) ja existiam, esse ficava hardcoded
+  // em CommercialPolicyConfig. Default 20 preserva o comportamento atual.
+  WHOLESALE_DISCOUNT_PERCENT: 20,
   WHOLESALE_MIN_QTY: 100,
   STOCK_PERCENT: 10,
   RECONCILIATION_HOUR_LOCAL: 3, // 03:00, ver worker/index.ts
@@ -148,6 +154,7 @@ async function getStockSourceValue(key: keyof typeof STOCK_SOURCE_DEFAULTS): Pro
 
 export const rules = {
   unitPriceMarkupPercent: () => getNumberRule('UNIT_PRICE_MARKUP_PERCENT'),
+  wholesaleDiscountPercent: () => getNumberRule('WHOLESALE_DISCOUNT_PERCENT'),
   wholesaleMinQty: () => getNumberRule('WHOLESALE_MIN_QTY'),
   stockPercent: () => getNumberRule('STOCK_PERCENT'),
   reconciliationHourLocal: () => getNumberRule('RECONCILIATION_HOUR_LOCAL'),
@@ -158,4 +165,26 @@ export const rules = {
 export const stockSource = {
   enterprise: () => getStockSourceValue('CISS_STOCK_ENTERPRISE'),
   location: () => getStockSourceValue('CISS_STOCK_LOCATION'),
+}
+
+/**
+ * Ponte camada-de-aplicacao -> modulo puro (FASE B.1, PROBLEMA 1): le os 4
+ * settings de regra comercial (markup/desconto atacado/exposicao de
+ * estoque/qty minima -- os mesmos 4 campos de CommercialPolicyConfig, ver
+ * src/lib/units/types.ts) e monta o config que sync/engine.ts injeta em
+ * calculateUnitPrice()/calculateUnitStock(). O modulo puro continua sem
+ * saber que settings existem -- so recebe o objeto ja resolvido. Se nenhum
+ * setting foi configurado ainda, cada getNumberRule() cai no RULE_DEFAULTS
+ * correspondente, que e byte-a-byte igual a DEFAULT_COMMERCIAL_POLICY_CONFIG
+ * -- zero mudanca de comportamento pra quem nunca abriu a tela de
+ * Configuracoes.
+ */
+export async function getCommercialPolicyConfig(): Promise<CommercialPolicyConfig> {
+  const [markupPercent, wholesaleDiscountPercent, stockExposurePercent, wholesaleMinQty] = await Promise.all([
+    rules.unitPriceMarkupPercent(),
+    rules.wholesaleDiscountPercent(),
+    rules.stockPercent(),
+    rules.wholesaleMinQty(),
+  ])
+  return { markupPercent, wholesaleDiscountPercent, stockExposurePercent, wholesaleMinQty }
 }

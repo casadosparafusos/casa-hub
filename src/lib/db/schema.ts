@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, index, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, real, index, uniqueIndex, check } from 'drizzle-orm/sqlite-core'
 import { sql } from 'drizzle-orm'
 
 // ---------------------------------------------------------------------------
@@ -54,8 +54,23 @@ export const syncProductState = sqliteTable(
 
     // ultimo valor lido no ERP
     erpPrice: real('erp_price'), // preco de varejo bruto do CISS (fonte da regra de markup e do preco/cento)
-    erpStock: integer('erp_stock'),
+    // `real`, NAO `integer` -- o CISS retorna estoque fracionario de verdade
+    // (KG, MT, e ate CT com sobra, ex: 2.3 cento). O truncamento pro Wake
+    // (floor) acontece so no limite da strategy/policy (ver src/lib/units),
+    // nunca na persistencia do valor cru lido do ERP. Ver §11 do FASE B.
+    erpStock: real('erp_stock'),
     erpReadAt: text('erp_read_at'),
+
+    // UNIT observada na ultima leitura do CISS (ver §14 do FASE B). `unitRaw`
+    // preserva o valor exatamente como veio (ex: " ct "); `unitNormalized` e
+    // trim+uppercase (ex: "CT") -- nunca sobrescrever um com o outro, ambos
+    // devem permanecer distinguiveis. `unitClass`/`unitResolutionStatus`
+    // espelham o resultado do UnitResolver (src/lib/units) so pra evitar
+    // reprocessar a classificacao em toda leitura de tela/relatorio.
+    unitRaw: text('unit_raw'),
+    unitNormalized: text('unit_normalized'),
+    unitClass: text('unit_class', { enum: ['HUNDRED', 'DIRECT', 'PACKAGE_MEASURED'] }),
+    unitResolutionStatus: text('unit_resolution_status', { enum: ['OK', 'UNSUPPORTED_UNIT', 'CONFIGURATION_REQUIRED', 'NO_STOCK_RECORD'] }),
 
     // ultimo valor calculado pelos motores (preco/estoque de destino)
     calculatedWakeUnitPrice: real('calculated_wake_unit_price'),
@@ -74,6 +89,53 @@ export const syncProductState = sqliteTable(
   },
   (t) => ({
     managedProductIdIdx: uniqueIndex('sync_product_state_managed_product_id_idx').on(t.managedProductId),
+  }),
+)
+
+/**
+ * Configuracao de conversao pra produtos PACKAGE_MEASURED (KG/MT) -- ver §9 e
+ * §10 do FASE B. Generica (uma tabela so, nao uma por UNIT): `sourceUnit`
+ * diz qual UNIT do CISS essa config atende, `quantityPerSaleUnit` e quantos
+ * kg/m formam 1 unidade vendavel no Wake. Sem uma linha ativa aqui pro
+ * produto, o motor (src/lib/units) retorna CONFIGURATION_REQUIRED e nao
+ * escreve nada -- nunca assume "1 KG" ou "1 MT" por padrao.
+ *
+ * BLOQUEIO B (FASE B.2, 16/09/2026): `wake_sku` foi removida desta tabela.
+ * Era denormalizada de managed_products.wake_sku, podia divergir, e uma
+ * varredura completa do repositorio confirmou que NENHUM consumidor le
+ * `productSaleUnitConfig.wakeSku` -- toda a engine de sync/reconciliacao usa
+ * exclusivamente `managedProducts.wakeSku` (join por `managed_product_id`,
+ * que ja e a identidade canonica desta tabela). Uma camada de importacao
+ * futura (FASE 7) resolve SKU -> managed_product_id antes de gravar aqui,
+ * nunca precisando desnormalizar de volta.
+ */
+export const productSaleUnitConfig = sqliteTable(
+  'product_sale_unit_config',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    managedProductId: integer('managed_product_id')
+      .notNull()
+      .references(() => managedProducts.id),
+    sourceUnit: text('source_unit', { enum: ['KG', 'MT'] }).notNull(),
+    quantityPerSaleUnit: real('quantity_per_sale_unit').notNull(),
+    active: integer('active', { mode: 'boolean' }).notNull().default(true),
+    createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    updatedBy: text('updated_by'), // usuario do Portal (X-Auth-User)
+  },
+  (t) => ({
+    managedProductIdIdx: index('product_sale_unit_config_managed_product_id_idx').on(t.managedProductId),
+    // No maximo 1 config ATIVA por produto -- evita duas configs conflitantes
+    // pro mesmo managed_product_id (ver §10). Desativar a antiga antes de
+    // ativar uma nova, nunca duas ativas ao mesmo tempo.
+    oneActivePerProductIdx: uniqueIndex('product_sale_unit_config_one_active_idx')
+      .on(t.managedProductId)
+      .where(sql`${t.active} = 1`),
+    quantityPositiveCheck: check('product_sale_unit_config_quantity_positive', sql`${t.quantityPerSaleUnit} > 0`),
+    // BLOQUEIO A (FASE B.2): antes so o enum TypeScript acima restringia
+    // source_unit a KG/MT -- sem CHECK no SQL, uma insercao direta (fora do
+    // Drizzle, ex: script solto/import futuro) podia gravar qualquer texto.
+    sourceUnitCheck: check('product_sale_unit_config_source_unit_check', sql`${t.sourceUnit} IN ('KG', 'MT')`),
   }),
 )
 

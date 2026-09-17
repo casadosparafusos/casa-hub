@@ -41,7 +41,7 @@ Status: provider live e systemd confirmados (`audit/fase-0-runtime-readonly`, `4
 
 Resultado em `PRODUCTION_RECONCILIATION.md` / `RECONCILIATION_READONLY.md`. Sem escrita na Wake; nada foi corrigido.
 
-## FASE 3 — Unit engine — P0 — mapa OWNER_CONFIRMED em 11/09/2026, implementação PENDENTE (`feat/unit-strategies`)
+## FASE 3 — Unit engine — P0 — implementado + hardening + final hardening + correção de roteamento comercial em `feat/unit-strategies` (14–16/09/2026), aguardando revisão/merge
 
 Censo READ-ONLY completo (22323 produtos, 13 siglas) em `CISS_UNIT_MAP.md`. Mapa canônico confirmado pelo proprietário:
 
@@ -53,17 +53,19 @@ Censo READ-ONLY completo (22323 produtos, 13 siglas) em `CISS_UNIT_MAP.md`. Mapa
 - schema/migrations para `product_sale_unit_config` (ver FASE 7);
 - Decimal para dinheiro.
 
-Nada disso foi implementado ainda — motor de produção continua tratando `CT`/PC/KG com a fórmula antiga. Implementação fica para `feat/unit-strategies`, a criar a partir de `origin/main` só após aprovação desta base documental.
+**Implementado na branch `feat/unit-strategies`**: módulo puro `scripts/reconcile/units/` (resolver/strategies/commercial-policy/compute), reexportado para o app via `src/lib/units/index.ts`; `sync/engine.ts` delega `syncPrices()`/`syncStock()` a `calculateUnitPrice()`/`calculateUnitStock()`; UNIT observada persistida em `sync_product_state` (`unit_raw`/`unit_normalized`/`unit_class`/`unit_resolution_status`, agora com `NO_STOCK_RECORD` — FASE B.2); schema `product_sale_unit_config` criada (migration `0003_unit_strategies_schema.sql`). **FASE B.1 (hardening, 15/09/2026)**: integridade de `product_sale_unit_config` provada contra banco real (FK/unicidade/CHECK — gap identificado em `source_unit`, sem CHECK no SQL); testes de fronteira de precisão monetária; prova de fail-closed pra UNIT sem registro; compatibilidade CT confirmada sem lacuna. **FASE B.2 (final hardening, 16/09/2026)**: fechou os 5 bloqueios apontados na revisão de B.1 — CHECK real `source_unit IN ('KG','MT')` no banco + remoção de `wake_sku` denormalizado (migration `0004_public_betty_brant.sql`), prova de escrita real isolada por UNIT (DIRECT/HUNDRED/PACKAGE_MEASURED), `moneyRound` reescrito (corrige bug real em `10.075→10.08`), status `NO_STOCK_RECORD` distinto de `UNSUPPORTED_UNIT` pra produto sem saldo no CISS, `CommercialPolicyConfig` revalidada. 397 testes no total. **FASE B.4 (correção de roteamento comercial, 16/09/2026)**: corrigiu o gate da Tabela de Preço 74 em `syncPrices()` — antes disparava pra qualquer produto só porque `WAKE_PRICE_TABLE_ID` existia (vazando o mecanismo de fixador pra DIRECT/KG/MT por acidente); agora exige `priceResult.policy === 'FIXADOR_CENTO'`, nunca `unitClass === 'HUNDRED'` isolado. Campo de domínio renomeado `wholesalePrice` → `expectedWholesalePrice` (deixa explícito que é valor esperado/auditoria, nunca publicado na Wake nesta fase; colunas legadas do banco mantidas). 5 cenários de writer da Tabela 74 cobertos por testes de integração reais (CT+FIXADOR_CENTO, DIRECT, KG, MT, CT+NoCommercialPolicy). Detalhes arquiteturais em `ARCHITECTURE_TARGET.md` (seção "Roteamento comercial"). 401 testes no total. **Ainda não mergeado, não deployado, não aplicado em produção** — motor de produção (`main`) continua tratando `CT`/PC/KG com a fórmula antiga até o merge e deploy explícitos. Os 16 produtos PC mal-rotulados e o produto KG atuais na Wake ao vivo **não foram corrigidos** (fora de escopo desta fase).
 
-## FASE 4 — Política comercial — P0
+## FASE 4 — Política comercial — P0 — implementado em `feat/unit-strategies` (14/09/2026), configurável via settings na FASE B.1 (15/09/2026), aguardando revisão/merge
 
-- separar normalização de política (arquitetura já descrita em `ARCHITECTURE_TARGET.md`);
+- separar normalização de política (arquitetura já descrita em `ARCHITECTURE_TARGET.md`) — **feito**: `commercial-policy.ts` separado de `strategies.ts`;
 - `FIXADOR_CENTO` (só produtos `CT`, nunca acoplada por padrão a UNIT futura):
   - +20% varejo;
   - >=100: -20% sobre varejo;
   - 10% de exposição de estoque;
-- validação 1/99/100/101;
-- validar promoção/tabela Wake.
+  - ~~valores ainda hardcoded~~ — **resolvido na FASE B.1**: `getCommercialPolicyConfig()` em `settings.ts` (`WHOLESALE_DISCOUNT_PERCENT` novo), com fallback pros mesmos defaults; threaded em `sync/engine.ts`, `pricing/engine.ts`, `inventory/engine.ts` e no reconciliador READ-ONLY;
+- validação 1/99/100/101 — coberta em `commercial-policy.test.ts`;
+- validar promoção/tabela Wake — **não fez parte desta fase** (nenhuma escrita real na Wake);
+- **FASE B.4 (16/09/2026)**: Tabela de Preço 74 passou a respeitar a decisão comercial centralizada (`priceResult.policy === 'FIXADOR_CENTO'`) em vez de disparar pra qualquer UNIT com `WAKE_PRICE_TABLE_ID` configurado — ver `ARCHITECTURE_TARGET.md`; validação READ-ONLY da promoção 10365 e do atacarejo nativo da Wake permanece pendência explícita da FASE C.
 
 ## FASE 5 — Histórico sustentável — P1
 
@@ -82,15 +84,15 @@ Nada disso foi implementado ainda — motor de produção continua tratando `CT`
 - simulação;
 - toggle whitelist.
 
-## FASE 7 — Embalagens KG/MT — P1
+## FASE 7 — Embalagens KG/MT — P1 — schema pronta em `feat/unit-strategies`; UI/CRUD ainda PENDENTE
 
-- Caixas → Embalagens (`KG` e `MT`, não só KG);
-- tabela genérica `product_sale_unit_config` (campos: `managed_product_id, wake_sku, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by`) — **não** criar tabela por UNIT (`kg_por_caixa`/`metros_por_rolo` separadas);
-- UI: rótulo `QT KG` ou `QT MT` conforme `source_unit`;
-- preview;
-- status configuração (`CONFIGURATION_REQUIRED` quando ausente/inválido);
-- preço da unidade de venda;
-- estoque da unidade de venda.
+- Caixas → Embalagens (`KG` e `MT`, não só KG) — **feito** (motor);
+- tabela genérica `product_sale_unit_config` (campos: `managed_product_id, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by` — `wake_sku` removida na FASE B.2, SKU só via JOIN com `managed_products`) — **feito**, migration `0003_unit_strategies_schema.sql` + `0004_public_betty_brant.sql` (FASE B.2), não aplicada em produção; integridade (FK/unicidade/CHECK `quantity_per_sale_unit>0` na FASE B.1, CHECK `source_unit IN ('KG','MT')` na FASE B.2) provada contra banco real; **sem camada de acesso/CRUD ou UI própria ainda** — hoje só é populável direto no banco;
+- UI: rótulo `QT KG` ou `QT MT` conforme `source_unit` — **pendente**;
+- preview — **pendente**;
+- status configuração (`CONFIGURATION_REQUIRED` quando ausente/inválido) — **feito** no motor (`calculateUnitPrice`/`calculateUnitStock`), sem exposição na UI ainda;
+- preço da unidade de venda — **feito** no motor;
+- estoque da unidade de venda — **feito** no motor.
 
 ### Importação por planilha (roadmap, não implementar antes desta fase)
 

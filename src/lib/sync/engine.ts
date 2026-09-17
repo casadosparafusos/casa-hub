@@ -2,11 +2,12 @@ import 'server-only'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db'
 import { withLocks, LockUnavailableError } from './lock'
-import { checkRequiredUnconfirmed, rules as ruleSettings, stockSource } from '../settings'
-import { calculatePricing, moneyRound } from '../pricing/engine'
-import { calculateInventory } from '../inventory/engine'
+import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource } from '../settings'
+import { calculateUnitPrice } from '../pricing/engine'
+import { calculateUnitStock } from '../inventory/engine'
+import { moneyRound, type CommercialPolicyConfig } from '../units'
 import { getActivePriceProvider } from '../ciss/price-provider'
-import { fetchStockForProducts } from '../ciss/stock'
+import { fetchStockForProducts, type CissStockRow } from '../ciss/stock'
 import {
   updateWakePrices,
   updateWakeStock,
@@ -124,13 +125,39 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
       .from(schema.managedProducts)
       .where(eq(schema.managedProducts.active, true))
 
+    // Busca UNICA de estoque+unit no CISS, compartilhada entre syncPrices()
+    // e syncStock() -- ver docs/CASA_HUB_FASE_B_UNIT_STRATEGIES.md §13. O
+    // preco no CISS nao expoe `unit` (ver ciss/price-provider.ts), so
+    // /products/stock expoe -- por isso precisa uma sync de preco tambem
+    // consultar esse endpoint agora, mesmo em kind='price'. Endpoint com
+    // historico de timeout intermitente (ver memoria
+    // ciss-stock-sales-timeout-intermitente-2026-09.md): buscar 1x aqui em
+    // vez de 1x por funcao evita dobrar essa exposicao numa run kind='both'.
+    const enterprise = await stockSource.enterprise()
+    const location = await stockSource.location()
+    const stockRows = await fetchStockForProducts(products.map((p) => p.cissProductId), { enterprise, location })
+    const stockByProduct = new Map(stockRows.map((r) => [r.productId, r]))
+
+    const packageConfigRows = await db
+      .select()
+      .from(schema.productSaleUnitConfig)
+      .where(eq(schema.productSaleUnitConfig.active, true))
+    const packageConfigs = new Map(packageConfigRows.map((r) => [r.managedProductId, { quantityPerSaleUnit: r.quantityPerSaleUnit }]))
+
+    // FASE B.1 (PROBLEMA 1) -- ponte settings -> CommercialPolicyConfig,
+    // lida UMA vez por run e injetada em syncPrices()/syncStock() (que por
+    // sua vez passam pra calculateUnitPrice()/calculateUnitStock()). O
+    // modulo puro (src/lib/units) nunca le settings/env diretamente -- ver
+    // src/lib/settings.ts#getCommercialPolicyConfig e no-write-path.test.ts.
+    const commercialPolicyConfig = await getCommercialPolicyConfig()
+
     let changed = 0
     let applied = 0
     let skipped = 0
     let failed = 0
 
     if (kind === 'price' || kind === 'both') {
-      const priceResult = await syncPrices(run.id, products, dryRun)
+      const priceResult = await syncPrices(run.id, products, dryRun, stockByProduct, packageConfigs, commercialPolicyConfig)
       changed += priceResult.changed
       applied += priceResult.applied
       skipped += priceResult.skipped
@@ -138,7 +165,7 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
     }
 
     if (kind === 'stock' || kind === 'both') {
-      const stockResult = await syncStock(run.id, products, dryRun)
+      const stockResult = await syncStock(run.id, products, dryRun, stockByProduct, packageConfigs, commercialPolicyConfig)
       changed += stockResult.changed
       applied += stockResult.applied
       skipped += stockResult.skipped
@@ -226,13 +253,18 @@ async function fetchPriceTableEntries(tabelaPrecoId: number): Promise<Map<string
 // aplicado no endpoint base).
 const TABLE_FAKE_DISCOUNT_PERCENT = 30
 
-async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun: boolean) {
+async function syncPrices(
+  syncRunId: number,
+  products: ManagedProduct[],
+  dryRun: boolean,
+  stockByProduct: Map<string, CissStockRow>,
+  packageConfigs: Map<number, { quantityPerSaleUnit: number }>,
+  commercialPolicyConfig: CommercialPolicyConfig,
+) {
   let changed = 0, applied = 0, skipped = 0, failed = 0
 
   const provider = getActivePriceProvider()
   const retailPrices = await provider.getRetailPrices(products.map((p) => p.cissProductId))
-  const markupPercent = await ruleSettings.unitPriceMarkupPercent()
-  const wholesaleMinQty = await ruleSettings.wholesaleMinQty()
 
   // Tabela de Preco dedicada (WAKE_PRICE_TABLE_ID, ver
   // src/lib/pricing/engine.ts) -- preco "de cento" so chega no Wake por
@@ -251,7 +283,7 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
   const toApplyUnitPrice: Array<{
     product: ManagedProduct
     unitPrice: number
-    specialPrice: number
+    expectedWholesalePrice: number | null
     sourceOldValue: number | null
     sourceNewValue: number
     targetOldValue: number | null
@@ -271,13 +303,56 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
       continue
     }
 
-    const pricing = calculatePricing(retailPrice, { unitPriceMarkupPercent: markupPercent, wholesaleMinQty })
+    // unitRaw so vem do endpoint de estoque (ver comentario em
+    // runSyncLocked()) -- por isso essa leitura, mesmo numa sync de preco.
+    const stockRow = stockByProduct.get(product.cissProductId)
+    const unitRaw = stockRow?.unitRaw ?? null
+    const packageConfig = packageConfigs.get(product.id) ?? null
+    const priceResult = calculateUnitPrice({ unitRaw, cissPrice: retailPrice, packageConfig, commercialPolicyConfig })
+
+    if (!priceResult.ok) {
+      // §1/§5: UNIT nao suportada ou config de PACKAGE_MEASURED faltando sao
+      // exatamente os problemas que essa fase existe pra expor -- por isso
+      // 'failed' (pinta vermelho na UI), nunca 'skipped', e zero escrita no
+      // Wake pra esse produto.
+      failed++
+      await upsertState(product.id, {
+        erpPrice: retailPrice,
+        erpReadAt: new Date().toISOString(),
+        unitRaw: priceResult.unitRaw,
+        unitNormalized: priceResult.unitNormalized,
+        unitClass: null,
+        unitResolutionStatus: priceResult.reason,
+      })
+      await logItem({
+        syncRunId,
+        managedProductId: product.id,
+        field: 'unit_price',
+        sourceOldValue: null,
+        sourceNewValue: retailPrice,
+        status: 'failed',
+        errorMessage: `UNIT nao processavel (${priceResult.reason}${priceResult.detail ? `: ${priceResult.detail}` : ''}) -- unit_raw=${priceResult.unitRaw ?? 'null'}`,
+      })
+      continue
+    }
+
+    const unitFields = {
+      unitRaw: priceResult.unitRaw,
+      unitNormalized: priceResult.unitNormalized,
+      unitClass: priceResult.unitClass,
+      unitResolutionStatus: 'OK' as const,
+    }
+
     const state = await getState(product.id)
-    const priceUnchanged = state?.lastAppliedWakeUnitPrice === pricing.wakeUnitPrice && state?.lastAppliedWakeSpecialPrice === pricing.wakeSpecialPrice
+    // lastAppliedWakeSpecialPrice e coluna legada (nunca renomeada -- FASE
+    // B.4 §5, evitar migration sem ganho imediato) que guarda
+    // expectedWholesalePrice pra fins de comparacao/auditoria; nunca reflete
+    // um valor de fato enviado a Wake.
+    const priceUnchanged = state?.lastAppliedWakeUnitPrice === priceResult.retailPrice && state?.lastAppliedWakeSpecialPrice === priceResult.expectedWholesalePrice
 
     if (priceUnchanged) {
       skipped++
-      await logItem({ syncRunId, managedProductId: product.id, field: 'unit_price', sourceOldValue: state?.erpPrice ?? null, sourceNewValue: retailPrice, targetOldValue: state?.lastAppliedWakeUnitPrice ?? null, targetNewValue: pricing.wakeUnitPrice, status: 'no_change' })
+      await logItem({ syncRunId, managedProductId: product.id, field: 'unit_price', sourceOldValue: state?.erpPrice ?? null, sourceNewValue: retailPrice, targetOldValue: state?.lastAppliedWakeUnitPrice ?? null, targetNewValue: priceResult.retailPrice, status: 'no_change' })
     } else {
       changed++
       const sourceOldValue = state?.erpPrice ?? null
@@ -291,7 +366,7 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
           sourceOldValue,
           sourceNewValue: retailPrice,
           targetOldValue,
-          targetNewValue: pricing.wakeUnitPrice,
+          targetNewValue: priceResult.retailPrice,
           status: 'planned',
         })
       }
@@ -301,15 +376,16 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
       await upsertState(product.id, {
         erpPrice: retailPrice,
         erpReadAt: new Date().toISOString(),
-        calculatedWakeUnitPrice: pricing.wakeUnitPrice,
-        calculatedWakeSpecialPrice: pricing.wakeSpecialPrice,
+        calculatedWakeUnitPrice: priceResult.retailPrice,
+        calculatedWakeSpecialPrice: priceResult.expectedWholesalePrice,
+        ...unitFields,
       })
 
       if (!dryRun) {
         toApplyUnitPrice.push({
           product,
-          unitPrice: pricing.wakeUnitPrice,
-          specialPrice: pricing.wakeSpecialPrice,
+          unitPrice: priceResult.retailPrice,
+          expectedWholesalePrice: priceResult.expectedWholesalePrice,
           sourceOldValue,
           sourceNewValue: retailPrice,
           targetOldValue,
@@ -317,12 +393,21 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
       }
     }
 
-    // Preco Por = preco unitario (igual ao que vai no endpoint base); Preco
+    // Preco Por = preco de varejo (igual ao que vai no endpoint base); Preco
     // De = Preco Por + 30% (ficticio, so pra exibir desconto). Compara
     // contra o que JA ESTA no Wake (tableEntries), nao contra nosso estado
     // local -- por isso roda mesmo quando priceUnchanged acima.
-    if (tableEntries) {
-      const targetPrecoPor = pricing.wakeUnitPrice
+    //
+    // FASE B.4 §3 (BLOQUEIO PRINCIPAL): o gate NAO pode ser so "existe
+    // WAKE_PRICE_TABLE_ID configurado" (tableEntries !== null) -- isso
+    // aplicava a Tabela 74 a QUALQUER produto/UNIT, vazando o mecanismo de
+    // FIXADOR_CENTO (CT >= 100) pra DIRECT/KG/MT por acidente. O gate real e
+    // a decisao comercial centralizada (`priceResult.policy`, vinda de
+    // resolveCommercialPolicy() via computeUnit() -- ver
+    // src/lib/units/policy-resolver.ts), nunca `unitClass === 'HUNDRED'`
+    // isolado: CT com commercialPolicyOverride='NONE' tambem fica de fora.
+    if (tableEntries && priceResult.policy === 'FIXADOR_CENTO') {
+      const targetPrecoPor = priceResult.retailPrice
       const targetPrecoDe = moneyRound(targetPrecoPor * (1 + TABLE_FAKE_DISCOUNT_PERCENT / 100))
       const current = tableEntries.get(product.wakeSku)
       const tableUnchanged = current !== undefined && current.precoPor === targetPrecoPor && current.precoDe === targetPrecoDe
@@ -390,7 +475,7 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
 
         if (verified) {
           applied++
-          await upsertState(b.product.id, { lastAppliedWakeUnitPrice: b.unitPrice, lastAppliedWakeSpecialPrice: b.specialPrice, lastAppliedAt: new Date().toISOString(), lastSyncRunId: syncRunId })
+          await upsertState(b.product.id, { lastAppliedWakeUnitPrice: b.unitPrice, lastAppliedWakeSpecialPrice: b.expectedWholesalePrice, lastAppliedAt: new Date().toISOString(), lastSyncRunId: syncRunId })
           await logItem({
             syncRunId,
             managedProductId: b.product.id,
@@ -459,7 +544,14 @@ async function syncPrices(syncRunId: number, products: ManagedProduct[], dryRun:
 
 // --- Estoque ----------------------------------------------------------
 
-async function syncStock(syncRunId: number, products: ManagedProduct[], dryRun: boolean) {
+async function syncStock(
+  syncRunId: number,
+  products: ManagedProduct[],
+  dryRun: boolean,
+  stockByProduct: Map<string, CissStockRow>,
+  packageConfigs: Map<number, { quantityPerSaleUnit: number }>,
+  commercialPolicyConfig: CommercialPolicyConfig,
+) {
   let changed = 0, applied = 0, skipped = 0, failed = 0
 
   const { values } = await checkRequiredUnconfirmed()
@@ -476,15 +568,17 @@ async function syncStock(syncRunId: number, products: ManagedProduct[], dryRun: 
     return { changed, applied, skipped, failed }
   }
 
-  const stockPercent = await ruleSettings.stockPercent()
-  const enterprise = await stockSource.enterprise()
-  const location = await stockSource.location()
-  const stockRows = await fetchStockForProducts(products.map((p) => p.cissProductId), { enterprise, location })
-  const stockByProduct = new Map(stockRows.map((r) => [r.productId, r.stock]))
-  const noRecordIds = new Set(stockRows.filter((r) => r.noRecord).map((r) => r.productId))
-  // Aviso informativo (NAO e erro) gravado no item -- usa a coluna
-  // error_message, que a tela so pinta de vermelho quando status='failed'.
-  const NO_RECORD_NOTE = 'Sem registro de estoque no ERP -- tratado como 0'
+  // BLOQUEIO E (FASE B.2): status explicito e fail-closed pra "CISS
+  // respondeu OK mas nunca teve linha de estoque pra este produto" --
+  // distinto de UNSUPPORTED_UNIT/CONFIGURATION_REQUIRED (que sao problema de
+  // UNIT, nao de ausencia de registro) e nunca tratado como estoque zero
+  // silencioso. Antes desta correcao, `noRecord` so alimentava um aviso
+  // (`note`) num ramo que exige stockResult.ok=true -- mas noRecord=true
+  // sempre forca unitRaw=null (ver ciss/stock.ts), que o UnitResolver
+  // sempre resolve como falha, entao esse ramo nunca era alcancado: o aviso
+  // ficava morto e o operador so via "UNIT nao processavel (UNSUPPORTED_UNIT)
+  // -- unit_raw=null", indistinguivel de uma UNIT desconhecida de verdade.
+  const NO_RECORD_NOTE = 'Sem registro de estoque no ERP (CISS OK, nenhuma linha em ESTOQUE_SALDO_ATUAL para este produto) -- fail-closed, nada escrito no Wake'
 
   const toApply: Array<{
     product: ManagedProduct
@@ -492,25 +586,80 @@ async function syncStock(syncRunId: number, products: ManagedProduct[], dryRun: 
     sourceOldValue: number | null
     sourceNewValue: number
     targetOldValue: number | null
-    note: string | null
   }> = []
 
   for (const product of products) {
-    const erpStock = stockByProduct.get(product.cissProductId)
-    const note = noRecordIds.has(product.cissProductId) ? NO_RECORD_NOTE : null
+    const row = stockByProduct.get(product.cissProductId)
+    const erpStock = row?.stock
     if (erpStock === undefined) {
       failed++
       await logItem({ syncRunId, managedProductId: product.id, field: 'stock', status: 'failed', errorMessage: `Sem leitura de estoque CISS para ciss_product_id=${product.cissProductId}` })
       continue
     }
 
-    const inventory = calculateInventory(erpStock, { stockPercent })
+    if (row?.noRecord) {
+      failed++
+      await upsertState(product.id, {
+        erpStock,
+        erpReadAt: new Date().toISOString(),
+        unitRaw: null,
+        unitNormalized: null,
+        unitClass: null,
+        unitResolutionStatus: 'NO_STOCK_RECORD',
+      })
+      await logItem({
+        syncRunId,
+        managedProductId: product.id,
+        field: 'stock',
+        sourceOldValue: null,
+        sourceNewValue: erpStock,
+        status: 'failed',
+        errorMessage: NO_RECORD_NOTE,
+      })
+      continue
+    }
+
+    const unitRaw = row?.unitRaw ?? null
+    const packageConfig = packageConfigs.get(product.id) ?? null
+    const stockResult = calculateUnitStock({ unitRaw, cissStock: erpStock, packageConfig, commercialPolicyConfig })
+
+    if (!stockResult.ok) {
+      // Mesma logica de syncPrices(): UNIT nao suportada/config faltando ->
+      // 'failed' visivel, zero escrita no Wake (ver §1/§5).
+      failed++
+      await upsertState(product.id, {
+        erpStock,
+        erpReadAt: new Date().toISOString(),
+        unitRaw: stockResult.unitRaw,
+        unitNormalized: stockResult.unitNormalized,
+        unitClass: null,
+        unitResolutionStatus: stockResult.reason,
+      })
+      await logItem({
+        syncRunId,
+        managedProductId: product.id,
+        field: 'stock',
+        sourceOldValue: null,
+        sourceNewValue: erpStock,
+        status: 'failed',
+        errorMessage: `UNIT nao processavel (${stockResult.reason}${stockResult.detail ? `: ${stockResult.detail}` : ''}) -- unit_raw=${stockResult.unitRaw ?? 'null'}`,
+      })
+      continue
+    }
+
+    const unitFields = {
+      unitRaw: stockResult.unitRaw,
+      unitNormalized: stockResult.unitNormalized,
+      unitClass: stockResult.unitClass,
+      unitResolutionStatus: 'OK' as const,
+    }
+
     const state = await getState(product.id)
-    const stockUnchanged = state?.lastAppliedWakeStock === inventory.targetWakeStock
+    const stockUnchanged = state?.lastAppliedWakeStock === stockResult.targetWakeStock
 
     if (stockUnchanged) {
       skipped++
-      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue: state?.erpStock ?? null, sourceNewValue: erpStock, targetOldValue: state?.lastAppliedWakeStock ?? null, targetNewValue: inventory.targetWakeStock, status: 'no_change', errorMessage: note })
+      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue: state?.erpStock ?? null, sourceNewValue: erpStock, targetOldValue: state?.lastAppliedWakeStock ?? null, targetNewValue: stockResult.targetWakeStock, status: 'no_change' })
       continue
     }
 
@@ -519,13 +668,13 @@ async function syncStock(syncRunId: number, products: ManagedProduct[], dryRun: 
     const targetOldValue = state?.lastAppliedWakeStock ?? null
 
     if (dryRun) {
-      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue, sourceNewValue: erpStock, targetOldValue, targetNewValue: inventory.targetWakeStock, status: 'planned', errorMessage: note })
+      await logItem({ syncRunId, managedProductId: product.id, field: 'stock', sourceOldValue, sourceNewValue: erpStock, targetOldValue, targetNewValue: stockResult.targetWakeStock, status: 'planned' })
     }
     // fora de dry-run o log so acontece depois da reconferencia, la embaixo.
 
-    await upsertState(product.id, { erpStock, erpReadAt: new Date().toISOString(), calculatedWakeStock: inventory.targetWakeStock })
+    await upsertState(product.id, { erpStock, erpReadAt: new Date().toISOString(), calculatedWakeStock: stockResult.targetWakeStock, ...unitFields })
 
-    if (!dryRun) toApply.push({ product, targetStock: inventory.targetWakeStock, sourceOldValue, sourceNewValue: erpStock, targetOldValue, note })
+    if (!dryRun) toApply.push({ product, targetStock: stockResult.targetWakeStock, sourceOldValue, sourceNewValue: erpStock, targetOldValue })
   }
 
   if (!dryRun && toApply.length > 0) {
@@ -644,7 +793,6 @@ async function syncStock(syncRunId: number, products: ManagedProduct[], dryRun: 
             targetOldValue: b.targetOldValue,
             targetNewValue: b.targetStock,
             status: 'applied',
-            errorMessage: b.note,
             wakeAfterRaw: putResponseRaw,
           })
         } else {
