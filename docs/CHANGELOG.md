@@ -1,5 +1,20 @@
 # CHANGELOG — documentação
 
+## v10 — 17/09/2026
+
+FASE C (`feat/write-guards-readback`, sobre `main` já com `feat/unit-strategies` mergeada via PR #2, `c13e7f8`): guards de produção + read-after-write + estados de aplicação. Branch nova, sem merge/deploy/migration em produção/escrita real em Wake/CISS/remediação dos 16 PC/KG/promoção 10365. Ver detalhes em `STATUS.md` e `ARCHITECTURE_TARGET.md` (seção "FASE C").
+
+Mudanças:
+- **Guard `MOCK_PROVIDER_WRITE_BLOCKED`**: `runSyncLocked()` (`src/lib/sync/engine.ts`) recusa a run inteira, antes de criar `sync_runs`, quando o provider de preço ativo é `mock` e `dryRun` é `false`, pra qualquer `kind`; `dryRun:true` com mock continua liberado;
+- modelo de estados `DETECTED → SENT → READ BACK → VERIFIED`, com `syncRunItems.status` ganhando o valor `'mismatch'` (enum TypeScript em `src/lib/db/schema.ts`, sem CHECK novo no SQL — sem migration) — distinção explícita entre `'mismatch'` (Wake aceitou a escrita, releitura achou valor diferente — a classe do bug histórico do SKU 7648/syncRunId=172) e `'failed'` (erro na escrita ou na própria releitura); aplicado à reconferência de preço unitário e à Tabela 74; estoque permanece `'applied'`/`'failed'` (ACK binário do PUT, sem "valor diferente" possível nesse contrato);
+- **read-after-write da Tabela de Preço 74** (lacuna real, antes inexistente): `updateWakePriceTableProducts`/`addWakePriceTableProducts` não devolvem ACK por item — agora a tabela é relida via `fetchPriceTableEntries()` após a escrita, comparando item a item antes de `applied`/`mismatch`/`failed`;
+- teste de idempotência ponta a ponta: `runSync()` duas vezes seguidas com a mesma origem não dispara nenhum dos 4 writers Wake na segunda run, incluindo pelo novo caminho de releitura da Tabela 74;
+- **cobertura de retry/backoff pra `ciss/client.ts` e `wake/client.ts`** (antes zero, só indireta via mocks de `engine.test.ts`): `src/lib/ciss/client.test.ts` (7 testes) e `src/lib/wake/client.test.ts` (9 testes) — transiente-então-sucesso, esgotamento de `MAX_RETRIES`, erro permanente sem retry, token ausente, timeout/`AbortError`, `Retry-After` da Wake, e o circuito de throttle da Wake (abre após 5×429 consecutivos, recusa sem tentar a rede);
+- documentação da estratégia de rate-limit/concorrência já existente em `sync/engine.ts` (`WAKE_BATCH_SIZE=50`, `WAKE_VERIFY_DELAY_MS=650`, releitura serial por item pra preço, releitura em lote único pra Tabela 74, releitura via ACK do PUT sem GET extra pro estoque) — nenhum código de batching/concorrência foi alterado, só documentado;
+- renomeada a antiga pendência "FASE C" (leitura READ-ONLY da promoção 10365/atacarejo nativo/checkout, em `ARCHITECTURE_TARGET.md` e `ROADMAP.md`) para **FASE D**, pra não colidir com o nome usado pelos guards de produção desta rodada — decisão de documentação, nenhum adapter novo escrito, conforme a própria instrução do pedido que abriu esta fase;
+- 425 testes no total (401 da FASE B.4 + 24 líquidos novos: 8 em `engine.test.ts` cobrindo os 4 itens de estado/readback/idempotência acima + 16 de retry/backoff); typecheck limpo;
+- **não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, os 16 PC mal-rotulados/produto KG/promoção 10365 continuam fora de escopo**.
+
 ## v9 — 16/09/2026
 
 FASE B.4 (`feat/unit-strategies`): correção final de roteamento comercial antes do Draft PR. Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS/alteração semântica da promoção 10365. Ver detalhes em `STATUS.md` e `ARCHITECTURE_TARGET.md` (seção "Roteamento comercial").

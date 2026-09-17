@@ -117,7 +117,9 @@ O comportamento real de atacarejo (>=100 unidades) hoje depende inteiramente do 
 - Storefront `prices.wholesalePrices` — exposição pro cliente final do atacarejo nativo, **não escrito por este app**;
 - promoção 10365 (`WAKE_PROMOTION_ID`): hoje só usada como settings/gate de UI, **nunca referenciada em write real**; semântica completa (condição 4, ação 2, escopo) ainda `UNVERIFIED` (ver `RECONCILIATION_READONLY.md`) — não alterada nesta fase.
 
-### Pendência explícita FASE C (READ-ONLY, antes de qualquer remediation/write)
+### Pendência explícita FASE D (READ-ONLY, antes de qualquer remediation/write)
+
+Renomeada de "FASE C" (nome usado nesta seção antes de 17/09/2026) para não colidir com a FASE C real (guards de produção + read-after-write + estados, ver seção abaixo) — decisão explícita do pedido que abriu a FASE C, que instruiu não tocar na promoção 10365 nesta rodada e adiar esta pendência para a próxima letra.
 
 ```text
 - ler promoção 10365 (condição/ativo/vigência/percentual/escopo);
@@ -126,6 +128,62 @@ O comportamento real de atacarejo (>=100 unidades) hoje depende inteiramente do 
 - validar checkout 1/99/100/101 em janela aprovada;
 - só então decidir remediation/write, com aprovação explícita separada.
 ```
+
+## FASE C — Guards de produção + read-after-write + estados de aplicação (`feat/write-guards-readback`, 17/09/2026)
+
+Converte o motor de sync (canônico por UNIT, FASE B/B.1–B.4) num caminho de escrita operacionalmente seguro, com um modelo de estados explícito por item e sem nenhuma remediação/deploy nesta rodada. Sem merge, sem migration em produção, sem escrita real em Wake/CISS, sem tocar nos 16 produtos PC/KG reais nem na promoção 10365.
+
+### Modelo de estados por item
+
+```text
+DETECTED   -- diff encontrado (ERP != estado esperado no Wake), ainda nada enviado
+  → SENT       -- chamada de escrita emitida (PUT/POST Wake)
+    → READ BACK  -- reconferência pós-escrita executada (GET SKU / GET Tabela 74 / ACK do próprio PUT)
+      → VERIFIED   -- readback confirma o valor enviado            => status 'applied'
+      → MISMATCH   -- Wake aceitou a escrita, mas o valor lido é outro => status 'mismatch'
+      → FAILED     -- a própria chamada de escrita ou a de readback deram erro/não encontraram o item => status 'failed'
+```
+
+Estados de bloqueio (nunca chegam a `DETECTED` — recusam a run ou o item antes de qualquer tentativa de escrita):
+
+- `MOCK_PROVIDER_WRITE_BLOCKED` — run inteira recusada antes de criar `sync_runs`, ver abaixo;
+- `CONFIGURATION_REQUIRED` / `UNSUPPORTED_UNIT` / `NO_STOCK_RECORD` — por item, já existentes desde a FASE B/B.2 (`unit_resolution_status`), fail-closed antes de qualquer cálculo de preço/estoque.
+
+### MISMATCH vs FAILED — por que a distinção importa
+
+Antes da FASE C, qualquer reconferência que não confirmasse o valor enviado virava `'failed'`, sem diferenciar duas causas bem distintas: "o Wake recusou/não achei o item" (falha de infraestrutura, retry faz sentido) vs. "o Wake aceitou a chamada sem erro, mas o valor lá é outro" (o bug histórico do SKU 7648/syncRunId=172 — sintoma de um bug de contrato ou concorrência, não de rede). A partir da FASE C:
+
+- `'mismatch'`: a chamada de escrita teve sucesso (Wake não devolveu erro) **e** a releitura encontrou o item, mas com um valor diferente do enviado;
+- `'failed'`: a própria chamada de escrita deu erro, OU a releitura não encontrou o item / falhou por conta própria (rede, timeout);
+- em ambos os casos `lastApplied*` (`sync_product_state`) **não avança** — a próxima run detecta o item como "mudou" de novo e tenta reenviar, em vez de travar num falso "já aplicado".
+
+Aplicado em dois pontos de `syncPrices()` (`src/lib/sync/engine.ts`): a reconferência de preço unitário (`getWakeProductBySku`) e a reconferência da Tabela de Preço 74 (`fetchPriceTableEntries`, ver abaixo). **Não** aplicado ao estoque: a reconferência de estoque usa o ACK do próprio `PUT /produtos/estoques` (`produtosAtualizados`/`produtosNaoAtualizados`), que é um aceite/rejeição binário por variante — não existe um "valor diferente" intermediário nesse contrato, então estoque continua só `'applied'`/`'failed'`.
+
+### Read-after-write da Tabela de Preço 74
+
+Lacuna real identificada na auditoria que abriu a FASE C: `updateWakePriceTableProducts`/`addWakePriceTableProducts` (`src/lib/wake/client.ts`) devolvem `void` — sem ACK por item, diferente do preço unitário (GET `/produtos/{sku}`) e do estoque (ACK do próprio PUT). Sem nenhuma leitura pós-escrita, uma falha silenciosa do Wake nesse caminho (aceitar a chamada sem aplicar) nunca seria detectada — exatamente a classe de bug já comprovada no preço unitário (SKU 7648). Corrigido reaproveitando o mesmo `fetchPriceTableEntries(priceTableId)` já usado pra montar o diff no topo de `syncPrices()`: após `updateWakePriceTableProducts`/`addWakePriceTableProducts` retornarem sem erro, a tabela inteira é relida e cada item do lote é comparado (`precoPor`/`precoDe`) contra o valor alvo antes de decidir `applied`/`mismatch`/`failed`.
+
+### Guard `MOCK_PROVIDER_WRITE_BLOCKED`
+
+`runSyncLocked()` (`src/lib/sync/engine.ts`) recusa a run inteira — antes de criar qualquer linha em `sync_runs`, mesmo posicionamento do check de `REQUIRED_UNCONFIRMED_KEYS` — quando `getActivePriceProvider().name === 'mock'` e `dryRun` é `false`, independente de `kind` (`price`/`stock`/`both`). Um provider de preço mockado é sinal de ambiente não pronto pra produção como um todo, não uma questão isolada de preço; `dryRun: true` continua permitido com o provider mockado (nenhuma escrita acontece de qualquer forma).
+
+### Idempotência
+
+Já garantida estruturalmente antes da FASE C pelas comparações `priceUnchanged`/`stockUnchanged`/`tableUnchanged` (que evitam reenviar um valor que já bate com o ERP) — a FASE C adiciona apenas a prova de que isso se sustenta ponta a ponta rodando `runSync()` duas vezes seguidas com a mesma origem, inclusive pelo novo caminho de releitura da Tabela 74: zero chamadas aos 4 writers Wake na segunda run.
+
+### Rate limit e concorrência — escrita + read-after-write (FASE C, §12)
+
+Nenhuma mudança de estratégia de lote nesta fase — a FASE C só adicionou leituras de reconferência aos pontos que já existiam; a tabela abaixo documenta o que já estava implementado e permanece válido:
+
+| Caminho | Lote de escrita | Reconferência | Ritmo |
+|---|---|---|---|
+| Preço unitário | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/precos` | 1 `GET /produtos/{sku}` por item do lote, **serial** (nunca em paralelo) | `sleep(WAKE_VERIFY_DELAY_MS = 650ms)` após cada item — mantém lote+reconferência combinados bem abaixo dos 120 req/min documentados da Wake |
+| Tabela de Preço 74 | `WAKE_BATCH_SIZE = 50` por `PUT`/`POST /tabelaPrecos/{id}/produtos` | 1 `GET /tabelaPrecos/{id}/produtos` paginado por **lote inteiro** (não por item) via `fetchPriceTableEntries()` — mesma função usada pro diff inicial | sem sleep extra por item; o custo por lote já é 1 chamada, não N |
+| Estoque | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/estoques` | nenhuma chamada extra — reconfere pelo **ACK do próprio PUT** (`produtosAtualizados`/`produtosNaoAtualizados`) | `sleep(WAKE_VERIFY_DELAY_MS)` uma vez por lote (não por item, já que não há GET extra) |
+| Cliente CISS (`src/lib/ciss/client.ts`) | — (só leitura) | — | `MAX_RETRIES = 3`, backoff exponencial `min(1000·2^(tentativa-1), 8000)` ms; retry em 429/5xx/timeout; erro permanente (4xx≠429) nunca repete |
+| Cliente Wake (`src/lib/wake/client.ts`) | — | — | `MAX_RETRIES = 2` (deliberadamente mais conservador que o CISS — ver comentário no topo do arquivo); 429 respeita `Retry-After` do header (default 5s se ausente); 5xx usa backoff fixo `3000ms·tentativa`; **circuito abre** após 5 respostas 429 consecutivas na mesma execução (`consecutiveThrottles`, estado de módulo) e recusa novas chamadas com `WakePermanentError` sem nem tentar a rede — proteção contra o lockout de 1h documentado do token Wake em throttle persistente |
+
+Cobertura de teste do retry/backoff (antes zero, só indireta via mocks de `engine.test.ts`): `src/lib/ciss/client.test.ts` (7 testes) e `src/lib/wake/client.test.ts` (9 testes), incluindo o circuito de throttle da Wake.
 
 ## Realtime
 
