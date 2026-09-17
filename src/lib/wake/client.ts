@@ -192,11 +192,20 @@ function normalizeStockUpdateResponse(raw: unknown): WakeStockUpdateResponse {
  * devolvido tipado (WakeStockUpdateResponse) em vez de cru: descobrimos em
  * 10/09/2026 que esse endpoint ja da o ack definitivo por variante
  * (`resultado` + `detalhes` dentro de produtosAtualizados /
- * produtosNaoAtualizados). Esse ack e a fonte de verdade da reconferencia de
- * estoque em src/lib/sync/engine.ts -- NAO da pra reconferir estoque por
- * releitura, porque GET /produtos/{sku} nunca devolve `estoque` preenchido e
- * `dataAtualizacao` so anda em escrita de catalogo/preco, nunca em escrita de
- * estoque (ver o comentario longo em syncStock()).
+ * produtosNaoAtualizados).
+ *
+ * FASE C.1 (17/09/2026): esse ack sozinho NAO e mais suficiente pra marcar
+ * 'applied' -- e sinal de que o Wake ACEITOU a chamada, nao de que o estado
+ * remoto de fato ficou no valor esperado (regra canonica: "writer 2xx/ACK !=
+ * estado remoto verificado"). syncStock() agora usa o ack so como triagem
+ * (rejeitado no ack -> falha direto, sem gastar uma leitura) e, pro que foi
+ * aceito, faz uma releitura REAL via readWakeStockByVariantId() antes de
+ * confirmar 'applied'. Ate 17/09/2026 o codigo achava que `GET /produtos/{sku}`
+ * (unico endpoint testado na epoca) era a unica forma de reler estoque, e
+ * como ele sempre devolve `estoque: []`, a reconferencia por leitura parecia
+ * impossivel -- daí o ack-only. readWakeStockByVariantId() usa outro
+ * endpoint (`GET /produtos`, listagem/catalogo) que de fato devolve
+ * `estoque[]` quando `camposAdicionais=Estoque` e pedido (ver comentario la).
  */
 export async function updateWakeStock(items: WakeStockUpdateItem[]): Promise<WakeStockUpdateResponse> {
   if (items.length > 50) throw new Error('updateWakeStock: lote maior que 50 -- particione antes de chamar')
@@ -402,4 +411,68 @@ export async function getWakeProductBySku(sku: string): Promise<WakeProductLooku
     if (err instanceof WakePermanentError && /\b422\b/.test(err.message)) return null
     throw err
   }
+}
+
+// --- Estoque (leitura pos-escrita, FASE C.1 §2/§3) -------------------------
+
+interface WakeCatalogEstoqueEntry {
+  centroDistribuicaoId?: number
+  estoqueFisico?: number
+  [key: string]: unknown
+}
+
+interface WakeCatalogListItem {
+  produtoVarianteId?: number
+  estoque?: WakeCatalogEstoqueEntry[]
+  [key: string]: unknown
+}
+
+/**
+ * GET /produtos (endpoint de LISTAGEM/catalogo, nao o de item unico) com
+ * `camposAdicionais=Estoque` -- o UNICO jeito confirmado de reler estoque de
+ * volta da Wake. getWakeProductBySku() acima (GET /produtos/{sku}) sempre
+ * devolve `estoque: []` (confirmado ao vivo 08/09/2026, SKUs 7648 e 1563) --
+ * por isso a reconferencia de estoque usava so o ACK do PUT ate agora (ver
+ * updateWakeStock() e o comentario longo em syncStock()). Esse endpoint de
+ * listagem, em contraste, foi validado ao vivo em producao (11/09/2026,
+ * c7616d7, ver scripts/reconcile/wake-reader.ts::scanProducts()) devolvendo
+ * `estoque[]` populado por centro de distribuicao quando esse campo extra e
+ * pedido -- e a mesma chamada, so que aqui usada pra 1 variante por vez em
+ * vez de varrer o catalogo inteiro.
+ *
+ * Nao existe filtro exato por SKU/produtoVarianteId nesse endpoint -- so
+ * cursor ASCENDENTE EXCLUSIVO via `produtoVarianteIdDe` (devolve itens com
+ * ID estritamente MAIOR que o cursor, em ordem crescente; sem `pagina`).
+ * Como produtoVarianteId e unico, pedir cursor=variantId-1 com
+ * quantidadeRegistros=1 devolve exatamente o item alvo (se existir) como
+ * unico resultado -- mesma tecnica de scanProducts(), so com lote fixado em
+ * 1 em vez de varrer paginas.
+ *
+ * Retorna `null` pra qualquer caso NAO verificavel, nunca aceitando
+ * silenciosamente um produto errado vindo de um gap de ID:
+ *   - resposta vazia (produto nao encontrado nessa posicao de cursor);
+ *   - item devolvido com produtoVarianteId diferente do pedido;
+ *   - campo `estoque` ausente/nao-array;
+ *   - nenhuma entrada de `estoque[]` pro centroDistribuicaoId pedido;
+ *   - `estoqueFisico` ausente ou nao-numerico.
+ * Erro de rede/protocolo (WakeClientError) propaga pro chamador -- quem
+ * chama trata esse throw como FAILED, nunca como MISMATCH (ver syncStock()).
+ */
+export async function readWakeStockByVariantId(variantId: number, cdId: number): Promise<number | null> {
+  const items = await wakeRequest<WakeCatalogListItem[]>('GET', '/produtos', {
+    params: {
+      centrosDistribuicao: cdId,
+      camposAdicionais: 'Estoque',
+      produtoVarianteIdDe: variantId - 1,
+      quantidadeRegistros: 1,
+    },
+  })
+
+  const item = Array.isArray(items) ? items[0] : undefined
+  if (!item || item.produtoVarianteId !== variantId) return null
+  if (!Array.isArray(item.estoque)) return null
+
+  const entry = item.estoque.find((e) => e.centroDistribuicaoId === cdId)
+  if (!entry || typeof entry.estoqueFisico !== 'number') return null
+  return entry.estoqueFisico
 }
