@@ -104,6 +104,21 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
   const { kind, trigger, triggeredBy, dryRun } = options
 
   if (!dryRun) {
+    // FASE C §3: motor nunca pode escrever no Wake com o provider de preco
+    // em modo mock -- sinal de ambiente nao pronto pra producao (ver
+    // src/lib/ciss/price-provider.ts, unico switch mock/live do codebase).
+    // Vale pro run inteiro (price/stock/both), nao so pra 'price': um
+    // ambiente com preco mockado nao e um ambiente onde faz sentido confiar
+    // em nenhuma escrita real. Recusa ANTES de criar a sync_run, igual o
+    // check de REQUIRED_UNCONFIRMED_KEYS abaixo.
+    const activeProvider = getActivePriceProvider()
+    if (activeProvider.name === 'mock') {
+      throw new Error(
+        'MOCK_PROVIDER_WRITE_BLOCKED: CISS_PRICE_PROVIDER=mock nao pode gravar no Wake fora de dry-run. ' +
+          'Configure CISS_PRICE_PROVIDER=live ou rode com dryRun=true.',
+      )
+    }
+
     const { missing } = await checkRequiredUnconfirmed()
     if (missing.length > 0) {
       throw new Error(
@@ -459,12 +474,19 @@ async function syncPrices(
       // marcar 'applied' (ver comentario de WAKE_VERIFY_DELAY_MS acima).
       for (const b of batch) {
         let verified = false
+        // FASE C §5/§6: 'mismatch' = Wake respondeu e o valor la e outro
+        // (escrita foi aceita, mas divergiu) -- distinto de 'failed', que
+        // fica reservado pra erro de fato (produto sumiu na reconferencia
+        // ou a propria leitura falhou). Ver mesmo criterio no bloco da
+        // Tabela 74 mais abaixo.
+        let mismatch = false
         let verifyDetail = ''
         try {
           const live = await getWakeProductBySku(b.product.wakeSku)
           if (live && live.precoPor === b.unitPrice) {
             verified = true
           } else if (live) {
+            mismatch = true
             verifyDetail = `Wake ainda mostra precoPor=${live.precoPor} (esperado ${b.unitPrice})`
           } else {
             verifyDetail = 'produto nao encontrado no Wake na reconferencia'
@@ -501,8 +523,8 @@ async function syncPrices(
             sourceNewValue: b.sourceNewValue,
             targetOldValue: b.targetOldValue,
             targetNewValue: b.unitPrice,
-            status: 'failed',
-            errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia nao confirmou -- ${verifyDetail}`,
+            status: mismatch ? 'mismatch' : 'failed',
+            errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia ${mismatch ? 'encontrou valor diferente' : 'nao confirmou'} -- ${verifyDetail}`,
             wakeAfterRaw: putResponseRaw,
           })
         }
@@ -525,10 +547,39 @@ async function syncPrices(
       try {
         if (toUpdate.length > 0) await updateWakePriceTableProducts(priceTableId, toUpdate)
         if (toAdd.length > 0) await addWakePriceTableProducts(priceTableId, toAdd)
+
+        // FASE C §9: updateWakePriceTableProducts/addWakePriceTableProducts
+        // nao devolvem ACK por item (void, ver src/lib/wake/client.ts) --
+        // diferente do preco unitario (GET /produtos/{sku}) e do estoque
+        // (ACK do proprio PUT), o unico jeito de confirmar aqui e reler a
+        // Tabela de Preco inteira, igual fetchPriceTableEntries() ja faz no
+        // topo desta funcao pra montar o diff. Sem isto o bug historico do
+        // SKU 7648 (escrita aceita sem erro, valor no Wake nunca mudou)
+        // ficava sem protecao nenhuma neste caminho.
+        const verifyEntries = await fetchPriceTableEntries(priceTableId)
         for (const b of batch) {
           changed++
-          applied++
-          await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
+          const entry = verifyEntries.get(b.product.wakeSku)
+          const verified = entry !== undefined && entry.precoPor === b.precoPor && entry.precoDe === b.precoDe
+          if (verified) {
+            applied++
+            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
+          } else {
+            failed++
+            const detail =
+              entry === undefined
+                ? 'SKU nao encontrado na Tabela de Preco apos a escrita'
+                : `Tabela de Preco mostra precoPor=${entry.precoPor}/precoDe=${entry.precoDe} (esperado precoPor=${b.precoPor}/precoDe=${b.precoDe})`
+            await logItem({
+              syncRunId,
+              managedProductId: b.product.id,
+              field: 'special_price',
+              targetOldValue: null,
+              targetNewValue: b.precoPor,
+              status: entry === undefined ? 'failed' : 'mismatch',
+              errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia da Tabela de Preco nao confirmou -- ${detail}`,
+            })
+          }
         }
       } catch (err) {
         for (const b of batch) {
