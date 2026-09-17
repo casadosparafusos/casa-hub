@@ -21,7 +21,7 @@ Sem writes.
 
 Status: provider live e systemd confirmados (`audit/fase-0-runtime-readonly`, `464c429`/`8448372`). O restante (reconciliação Wake ao vivo) foi coberto pelas fases seguintes.
 
-## FASE 1 — Guards de produção — P0 — implementado + hardening final em `feat/write-guards-readback` (FASE C + FASE C.1, 17/09/2026), Draft PR #3 em revisão final antes do merge
+## FASE 1 — Guards de produção — P0 — implementado + hardening final em `feat/write-guards-readback` (FASE C + FASE C.1 + FASE C.2, 17/09/2026), Draft PR #3 em revisão final antes do merge
 
 - **impedir mock → Wake — feito**: `runSyncLocked()` (`src/lib/sync/engine.ts`) recusa a run inteira (`MOCK_PROVIDER_WRITE_BLOCKED`) antes de criar `sync_runs` quando `getActivePriceProvider().name === 'mock'` fora de dry-run, pra qualquer `kind`. Ver `ARCHITECTURE_TARGET.md`, seção "FASE C".
 - settings com Zod por chave — não fez parte desta rodada;
@@ -33,6 +33,8 @@ Status: provider live e systemd confirmados (`audit/fase-0-runtime-readonly`, `4
 **Também na FASE C (fora do escopo original desta linha do roadmap, mas mesma branch)**: modelo de estados `DETECTED → SENT → READ BACK → VERIFIED` com distinção explícita `MISMATCH` (Wake aceitou a escrita, valor releu diferente) vs `FAILED` (erro de fato); read-after-write da Tabela de Preço 74 (lacuna real, antes inexistente); teste de idempotência ponta a ponta; cobertura de retry/backoff pra `ciss/client.ts` e `wake/client.ts` (antes zero). Detalhes completos em `ARCHITECTURE_TARGET.md` e `STATUS.md`. 425 testes no total, typecheck limpo. **Não mergeado, não deployado, nenhuma escrita real em Wake/CISS.**
 
 **FASE C.1 (hardening final, 17/09/2026)** — fechou o BLOCKER da revisão do Draft PR #3: estoque confirmava só pelo ACK do PUT, sem satisfazer a regra "writer 2xx/ACK != estado remoto verificado" da própria FASE C. Novo adaptador `readWakeStockByVariantId()` (`src/lib/wake/client.ts`) confirma o valor real pós-escrita; estoque ganhou a mesma distinção `MISMATCH`/`FAILED` que preço e Tabela 74 já tinham. Também auditou e descartou um possível BLOCKER de performance na Tabela 74 (releitura é 1× por lote, não 1× por SKU) e confirmou, sem código novo, que o reconciliador READ-ONLY nunca chama um escritor (`no-write-path.test.ts`, 133 testes pré-existentes). Detalhes em `ARCHITECTURE_TARGET.md` (seção "FASE C.1") e `STATUS.md`. 441 testes no total. **Não mergeado, não deployado, nenhuma escrita real em Wake/CISS, FASE D não iniciada.**
+
+**FASE C.2 (correção de endpoint, 17/09/2026)** — revisão adicional apontou que `readWakeStockByVariantId()` usava o endpoint de listagem/catálogo (`GET /produtos` + cursor) em vez do endpoint oficial DEDICADO de estoque da Wake (`GET /produtos/{identificador}/estoque?tipoIdentificador=ProdutoVarianteId`). Corrigido: mesma assinatura/contrato de retorno, `engine.ts` sem mudanças, CD selecionado estritamente por `centroDistribuicaoId` dentro de `listProdutoVarianteCentroDistribuicaoEstoque[]` (nunca o total agregado do topo), campo comparado (`estoqueFisico`) auditado contra o writer. Detalhes em `ARCHITECTURE_TARGET.md` (seção "FASE C.2"), `STATUS.md` e `WAKE-API-CONTRATOS.md`. 443 testes no total. **Não mergeado, não deployado, nenhuma escrita real em Wake/CISS, FASE D não iniciada.**
 
 ## FASE 2 — Wake readback + reconciliação — P0 — Executado READ-ONLY 1× em produção (11/09/2026, `c7616d7`)
 

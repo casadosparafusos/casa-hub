@@ -1,5 +1,19 @@
 # CHANGELOG — documentação
 
+## v12 — 17/09/2026
+
+FASE C.2 (`feat/write-guards-readback`, mesma branch, ainda Draft PR #3): corrige o readback de estoque para usar o endpoint oficial dedicado da Wake em vez do endpoint de listagem/catálogo usado na FASE C.1. Achado de revisão adicional depois de fechado o BLOCKER da FASE C.1 — a semântica ACK≠VERIFIED já estava correta, só o endpoint HTTP era o errado. Branch não mergeada, sem deploy/migration em produção/escrita real em Wake/CISS/início da FASE D. Ver detalhes em `STATUS.md` e `ARCHITECTURE_TARGET.md` (seção "FASE C.2").
+
+Mudanças:
+- **Endpoint corrigido**: `readWakeStockByVariantId(variantId, cdId)` (`src/lib/wake/client.ts`) deixou de usar `GET /produtos` (endpoint de listagem/catálogo, com cursor `produtoVarianteIdDe`) e passou a usar `GET /produtos/{identificador}/estoque?tipoIdentificador=ProdutoVarianteId` — o endpoint oficial dedicado de consulta pontual de estoque documentado pela Wake. Assinatura e contrato de retorno (`number | null`) inalterados; `engine.ts` não precisou de nenhuma mudança;
+- Schema de resposta confirmado ao vivo em 17/09/2026 direto do OAS oficial (`wakecommerce.readme.io`): `{estoqueFisico, estoqueReservado, listProdutoVarianteCentroDistribuicaoEstoque: [{centroDistribuicaoId, nome, estoqueFisico, estoqueReservado}]}`; 404 devolve texto puro (`"Produto não encontrado"`), sem retry indevido;
+- **Seleção do CD**: estritamente `centroDistribuicaoId === cdId esperado` dentro de `listProdutoVarianteCentroDistribuicaoEstoque[]` — nunca o `estoqueFisico`/`estoqueReservado` agregado do topo (total entre todos os CDs), nunca `0` silencioso quando o CD esperado não aparece;
+- **Campo comparado auditado contra o writer**: `updateWakeStock()` grava `estoqueFisico` por CD (`WakeStockUpdateItem.listaEstoque[]`) — o reader agora compara o mesmo campo da mesma semântica, sem ajuste necessário; `estoqueReservado` continua nunca subtraído nem comparado;
+- **Testes**: suíte antiga de 7 testes (endpoint de listagem) substituída por 9 testes cobrindo os 8 cenários mínimos exigidos (request/query, CD correto com uma/várias entradas, CD ausente, 404 sem retry, 429/5xx com retry e com propagação quando persiste, estoque malformado → fail-closed); `engine.test.ts` não precisou de nenhuma mudança — cenários A–F da FASE C.1 e call-count da Tabela 74 continuam passando sem alteração;
+- **Rate limit**: sem mudança de estratégia — continua 1 GET por item aceito no ACK, serial, `MAX concurrent stock readbacks = 1`, mesmo `WAKE_VERIFY_DELAY_MS = 650ms`;
+- 443 testes no total (441 da FASE C.1 + 2 líquidos: suíte de `readWakeStockByVariantId` cresceu de 7 pra 9 cenários); `tsc --noEmit` e `vitest run` (21 arquivos) limpos; `npm run build` limpo;
+- **não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, FASE D não iniciada**.
+
 ## v11 — 17/09/2026
 
 FASE C.1 (`feat/write-guards-readback`, mesma branch da FASE C, sobre `main` já com `feat/unit-strategies` mergeada via PR #2, `c13e7f8`): hardening final antes do merge do PR #3, corrigindo o BLOCKER encontrado na revisão do código (estoque confirmava só pelo ACK do PUT, não por releitura real) e auditando o risco de leitura N× da Tabela 74. Branch não mergeada, sem deploy/migration em produção/escrita real em Wake/CISS/início da FASE D. Ver detalhes em `STATUS.md` e `ARCHITECTURE_TARGET.md` (seção "FASE C", subseção de estoque atualizada).

@@ -413,66 +413,86 @@ export async function getWakeProductBySku(sku: string): Promise<WakeProductLooku
   }
 }
 
-// --- Estoque (leitura pos-escrita, FASE C.1 §2/§3) -------------------------
+// --- Estoque (leitura pos-escrita, FASE C.2 §2/§3/§4) -----------------------
 
-interface WakeCatalogEstoqueEntry {
+/** Uma entrada por centro de distribuicao dentro da resposta do endpoint dedicado de estoque. */
+export interface WakeStockByCdEntry {
   centroDistribuicaoId?: number
+  nome?: string
   estoqueFisico?: number
-  [key: string]: unknown
-}
-
-interface WakeCatalogListItem {
-  produtoVarianteId?: number
-  estoque?: WakeCatalogEstoqueEntry[]
+  estoqueReservado?: number
   [key: string]: unknown
 }
 
 /**
- * GET /produtos (endpoint de LISTAGEM/catalogo, nao o de item unico) com
- * `camposAdicionais=Estoque` -- o UNICO jeito confirmado de reler estoque de
- * volta da Wake. getWakeProductBySku() acima (GET /produtos/{sku}) sempre
- * devolve `estoque: []` (confirmado ao vivo 08/09/2026, SKUs 7648 e 1563) --
- * por isso a reconferencia de estoque usava so o ACK do PUT ate agora (ver
- * updateWakeStock() e o comentario longo em syncStock()). Esse endpoint de
- * listagem, em contraste, foi validado ao vivo em producao (11/09/2026,
- * c7616d7, ver scripts/reconcile/wake-reader.ts::scanProducts()) devolvendo
- * `estoque[]` populado por centro de distribuicao quando esse campo extra e
- * pedido -- e a mesma chamada, so que aqui usada pra 1 variante por vez em
- * vez de varrer o catalogo inteiro.
+ * Corpo de resposta de GET /produtos/{identificador}/estoque. Schema
+ * confirmado ao vivo em 17/09/2026 direto do OAS oficial (nao do texto da
+ * doc, que so mostra o preview renderizado) via
+ * `GET https://wakecommerce.readme.io/wakecommerce/api-next/v2/branches/1.0-readme/reference/retorna-o-estoque-total-e-o-estoque-por-centro-de-distribuicao?reduce=false`,
+ * schema.paths["/produtos/{identificador}/estoque"].get.responses.200.
+ * `estoqueFisico`/`estoqueReservado` de topo sao o TOTAL agregado entre
+ * todos os CDs -- NUNCA usar pra validar a escrita de um CD especifico (ver
+ * §3 do relatorio FASE C.2). O estoque por CD vive em
+ * `listProdutoVarianteCentroDistribuicaoEstoque[]`.
+ */
+interface WakeStockReadResponse {
+  estoqueFisico?: number
+  estoqueReservado?: number
+  listProdutoVarianteCentroDistribuicaoEstoque?: WakeStockByCdEntry[]
+  [key: string]: unknown
+}
+
+/**
+ * GET /produtos/{identificador}/estoque?tipoIdentificador=ProdutoVarianteId --
+ * endpoint OFICIAL DEDICADO de consulta pontual de estoque (substitui, na
+ * FASE C.2, o uso de `GET /produtos` + cursor `produtoVarianteIdDe` da FASE
+ * C.1 -- ver docs/WAKE-API-CONTRATOS.md pro historico). Confirmado ao vivo
+ * em 17/09/2026 na doc oficial (wakecommerce.readme.io): path, query param
+ * `tipoIdentificador` (enum `Sku`|`ProdutoVarianteId`) e o schema de
+ * resposta completo (ver WakeStockReadResponse acima). Reaproveita
+ * wakeRequest() -- mesmo auth/retry/backoff/timeout/rate-limit/error-handling
+ * de todo o cliente Wake, nenhum cliente HTTP paralelo.
  *
- * Nao existe filtro exato por SKU/produtoVarianteId nesse endpoint -- so
- * cursor ASCENDENTE EXCLUSIVO via `produtoVarianteIdDe` (devolve itens com
- * ID estritamente MAIOR que o cursor, em ordem crescente; sem `pagina`).
- * Como produtoVarianteId e unico, pedir cursor=variantId-1 com
- * quantidadeRegistros=1 devolve exatamente o item alvo (se existir) como
- * unico resultado -- mesma tecnica de scanProducts(), so com lote fixado em
- * 1 em vez de varrer paginas.
+ * Selecao do CD: estritamente `centroDistribuicaoId === cdId` dentro de
+ * `listProdutoVarianteCentroDistribuicaoEstoque[]`. Se o CD esperado nao
+ * aparecer nessa lista, devolve `null` (nao verificavel) -- NUNCA aceita o
+ * total agregado do topo como substituto, e nunca considera silenciosamente
+ * `0`.
+ *
+ * Campo comparado: `estoqueFisico` da entrada do CD. Auditado contra o
+ * writer (`updateWakeStock()` acima, `WakeStockUpdateItem.listaEstoque[]`):
+ * o writer grava exatamente `estoqueFisico` por CD, entao writer e reader
+ * comparam o MESMO campo/semantica -- nao ha necessidade de ajuste (ver §4
+ * do relatorio). `estoqueReservado` nunca e subtraido nem comparado aqui --
+ * documentado a parte (relatorio FASE C.2, secao Semantics).
  *
  * Retorna `null` pra qualquer caso NAO verificavel, nunca aceitando
- * silenciosamente um produto errado vindo de um gap de ID:
- *   - resposta vazia (produto nao encontrado nessa posicao de cursor);
- *   - item devolvido com produtoVarianteId diferente do pedido;
- *   - campo `estoque` ausente/nao-array;
- *   - nenhuma entrada de `estoque[]` pro centroDistribuicaoId pedido;
- *   - `estoqueFisico` ausente ou nao-numerico.
- * Erro de rede/protocolo (WakeClientError) propaga pro chamador -- quem
- * chama trata esse throw como FAILED, nunca como MISMATCH (ver syncStock()).
+ * silenciosamente um valor incerto:
+ *   - 404 ("Produto Nao Encontrado" -- identificador nao existe na Wake);
+ *   - campo `listProdutoVarianteCentroDistribuicaoEstoque` ausente/nao-array;
+ *   - nenhuma entrada da lista com `centroDistribuicaoId === cdId`;
+ *   - `estoqueFisico` da entrada do CD ausente, nao-numerico ou nao-finito.
+ * Erro de rede/protocolo (WakeClientError transiente ou permanente que nao
+ * seja 404) propaga pro chamador -- quem chama trata esse throw como
+ * FAILED, nunca como MISMATCH (ver syncStock()). 404 nunca e retentado --
+ * wakeRequest() so retenta 429/5xx/timeout, um 404 cai direto no ramo
+ * `!res.ok` e lanca de primeira (ver comentario de wakeRequest() acima).
  */
 export async function readWakeStockByVariantId(variantId: number, cdId: number): Promise<number | null> {
-  const items = await wakeRequest<WakeCatalogListItem[]>('GET', '/produtos', {
-    params: {
-      centrosDistribuicao: cdId,
-      camposAdicionais: 'Estoque',
-      produtoVarianteIdDe: variantId - 1,
-      quantidadeRegistros: 1,
-    },
-  })
+  let response: WakeStockReadResponse
+  try {
+    response = await wakeRequest<WakeStockReadResponse>('GET', `/produtos/${variantId}/estoque`, {
+      params: { tipoIdentificador: 'ProdutoVarianteId' },
+    })
+  } catch (err) {
+    if (err instanceof WakePermanentError && /\b404\b/.test(err.message)) return null
+    throw err
+  }
 
-  const item = Array.isArray(items) ? items[0] : undefined
-  if (!item || item.produtoVarianteId !== variantId) return null
-  if (!Array.isArray(item.estoque)) return null
+  const list = response?.listProdutoVarianteCentroDistribuicaoEstoque
+  if (!Array.isArray(list)) return null
 
-  const entry = item.estoque.find((e) => e.centroDistribuicaoId === cdId)
-  if (!entry || typeof entry.estoqueFisico !== 'number') return null
+  const entry = list.find((e) => e.centroDistribuicaoId === cdId)
+  if (!entry || typeof entry.estoqueFisico !== 'number' || !Number.isFinite(entry.estoqueFisico)) return null
   return entry.estoqueFisico
 }

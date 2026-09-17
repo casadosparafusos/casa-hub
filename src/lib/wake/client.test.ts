@@ -159,14 +159,14 @@ describe('wakeRequest -- retry/backoff/circuito (FASE C §11)', () => {
   })
 })
 
-// FASE C.1 §2/§3: readWakeStockByVariantId() e o novo adaptador READ-ONLY
-// que finalmente permite reconferir estoque por releitura (GET /produtos,
-// endpoint de listagem/catalogo, nao o de item unico usado por
-// getWakeProductBySku -- ver comentario em src/lib/wake/client.ts). Estes
-// testes provam a query certa (cursor exclusivo produtoVarianteIdDe =
-// variantId-1) e cada caso de "nao verificavel" -> null, nunca aceitando
-// silenciosamente um produto de um gap de ID.
-describe('readWakeStockByVariantId (FASE C.1 §2/§3)', () => {
+// FASE C.2 §2/§3/§4/§6: readWakeStockByVariantId() passou a usar o endpoint
+// OFICIAL DEDICADO de estoque (GET /produtos/{identificador}/estoque,
+// tipoIdentificador=ProdutoVarianteId) em vez do endpoint de listagem
+// (GET /produtos + cursor produtoVarianteIdDe) usado na FASE C.1 -- ver
+// docs/WAKE-API-CONTRATOS.md pro historico e comentario em
+// src/lib/wake/client.ts pra fonte da confirmacao do schema de resposta.
+// Estes testes cobrem os cenarios minimos A-H exigidos pela FASE C.2 §6.
+describe('readWakeStockByVariantId (FASE C.2 §2/§3/§4/§6 -- endpoint oficial dedicado)', () => {
   beforeEach(async () => {
     vi.useFakeTimers()
     mockGetSecret.mockReset()
@@ -180,65 +180,103 @@ describe('readWakeStockByVariantId (FASE C.1 §2/§3)', () => {
     vi.unstubAllGlobals()
   })
 
-  it('monta a query com cursor exclusivo (variantId-1) e os params certos', async () => {
+  function stockResponse(overrides: {
+    estoqueFisico?: number
+    estoqueReservado?: number
+    cds?: Array<{ centroDistribuicaoId: number; nome?: string; estoqueFisico?: unknown; estoqueReservado?: number }>
+  } = {}): string {
+    return JSON.stringify({
+      estoqueFisico: overrides.estoqueFisico ?? 0,
+      estoqueReservado: overrides.estoqueReservado ?? 0,
+      listProdutoVarianteCentroDistribuicaoEstoque: overrides.cds ?? [],
+    })
+  }
+
+  it('A. monta a query certa: GET /produtos/{variantId}/estoque, tipoIdentificador=ProdutoVarianteId', async () => {
     const { readWakeStockByVariantId } = await import('./client')
-    vi.mocked(fetch).mockResolvedValue(
-      fakeResponse(200, JSON.stringify([{ produtoVarianteId: 281145, estoque: [{ centroDistribuicaoId: 25, estoqueFisico: 42 }] }])),
-    )
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(200, stockResponse({ cds: [{ centroDistribuicaoId: 25, estoqueFisico: 42 }] })))
 
     const result = await readWakeStockByVariantId(281145, 25)
 
     expect(result).toBe(42)
     const calledUrl = new URL(vi.mocked(fetch).mock.calls[0]![0] as string)
-    expect(calledUrl.pathname).toBe('/produtos')
-    expect(calledUrl.searchParams.get('produtoVarianteIdDe')).toBe('281144')
-    expect(calledUrl.searchParams.get('quantidadeRegistros')).toBe('1')
-    expect(calledUrl.searchParams.get('camposAdicionais')).toBe('Estoque')
-    expect(calledUrl.searchParams.get('centrosDistribuicao')).toBe('25')
+    expect(calledUrl.pathname).toBe('/produtos/281145/estoque')
+    expect(calledUrl.searchParams.get('tipoIdentificador')).toBe('ProdutoVarianteId')
   })
 
-  it('resposta vazia (produto nao encontrado nessa posicao de cursor): devolve null', async () => {
-    const { readWakeStockByVariantId } = await import('./client')
-    vi.mocked(fetch).mockResolvedValue(fakeResponse(200, JSON.stringify([])))
-
-    expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
-  })
-
-  it('item devolvido com produtoVarianteId diferente do pedido (gap de ID): devolve null, nunca aceita outro produto', async () => {
+  it('B. resposta com o CD esperado: devolve o estoqueFisico da entrada correta', async () => {
     const { readWakeStockByVariantId } = await import('./client')
     vi.mocked(fetch).mockResolvedValue(
-      fakeResponse(200, JSON.stringify([{ produtoVarianteId: 281146, estoque: [{ centroDistribuicaoId: 25, estoqueFisico: 99 }] }])),
+      fakeResponse(200, stockResponse({ estoqueFisico: 42, cds: [{ centroDistribuicaoId: 25, nome: 'CD Principal', estoqueFisico: 42 }] })),
+    )
+
+    expect(await readWakeStockByVariantId(281145, 25)).toBe(42)
+  })
+
+  it('C. multiplos CDs na resposta: escolhe somente a entrada do cdId esperado, ignora as outras', async () => {
+    const { readWakeStockByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(
+      fakeResponse(
+        200,
+        stockResponse({
+          estoqueFisico: 142,
+          cds: [
+            { centroDistribuicaoId: 10, estoqueFisico: 100 },
+            { centroDistribuicaoId: 25, estoqueFisico: 42 },
+          ],
+        }),
+      ),
+    )
+
+    expect(await readWakeStockByVariantId(281145, 25)).toBe(42)
+  })
+
+  it('D. CD esperado ausente na lista: devolve null -- nunca usa o total agregado do topo, nunca 0 silencioso', async () => {
+    const { readWakeStockByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(
+      fakeResponse(200, stockResponse({ estoqueFisico: 100, cds: [{ centroDistribuicaoId: 99, estoqueFisico: 100 }] })),
     )
 
     expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
   })
 
-  it('campo estoque ausente na resposta: devolve null', async () => {
+  it('E. 404 (produto nao encontrado): devolve null, uma unica tentativa, sem retry indevido', async () => {
     const { readWakeStockByVariantId } = await import('./client')
-    vi.mocked(fetch).mockResolvedValue(fakeResponse(200, JSON.stringify([{ produtoVarianteId: 281145 }])))
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(404, 'Produto nao encontrado'))
 
     expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 
-  it('estoque[] presente mas sem entrada pro centro de distribuicao pedido: devolve null', async () => {
+  it('F. 429 (throttle): respeita a politica de retry/backoff existente e confirma o valor apos a retentativa', async () => {
     const { readWakeStockByVariantId } = await import('./client')
-    vi.mocked(fetch).mockResolvedValue(
-      fakeResponse(200, JSON.stringify([{ produtoVarianteId: 281145, estoque: [{ centroDistribuicaoId: 99, estoqueFisico: 42 }] }])),
-    )
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fakeResponse(429, 'throttle', { 'Retry-After': '5' }))
+      .mockResolvedValueOnce(fakeResponse(200, stockResponse({ cds: [{ centroDistribuicaoId: 25, estoqueFisico: 42 }] })))
 
-    expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
+    const promise = readWakeStockByVariantId(281145, 25)
+    await vi.runAllTimersAsync()
+    const result = await promise
+
+    expect(result).toBe(42)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
-  it('estoqueFisico nao-numerico: devolve null', async () => {
+  it('G. 5xx: respeita a politica de retry existente e confirma o valor apos a retentativa', async () => {
     const { readWakeStockByVariantId } = await import('./client')
-    vi.mocked(fetch).mockResolvedValue(
-      fakeResponse(200, JSON.stringify([{ produtoVarianteId: 281145, estoque: [{ centroDistribuicaoId: 25, estoqueFisico: null }] }])),
-    )
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fakeResponse(500, 'erro interno'))
+      .mockResolvedValueOnce(fakeResponse(200, stockResponse({ cds: [{ centroDistribuicaoId: 25, estoqueFisico: 42 }] })))
 
-    expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
+    const promise = readWakeStockByVariantId(281145, 25)
+    await vi.runAllTimersAsync()
+    const result = await promise
+
+    expect(result).toBe(42)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
-  it('erro de rede/protocolo propaga (chamador trata como FAILED, nao como null/MISMATCH)', async () => {
+  it('G2. 5xx/rede persistente (retries esgotados): propaga (chamador trata como FAILED, nao null/MISMATCH)', async () => {
     const { readWakeStockByVariantId, WakeTransientError } = await import('./client')
     vi.mocked(fetch).mockResolvedValue(fakeResponse(500, 'erro interno'))
 
@@ -246,5 +284,18 @@ describe('readWakeStockByVariantId (FASE C.1 §2/§3)', () => {
     const assertion = expect(promise).rejects.toThrow(WakeTransientError)
     await vi.runAllTimersAsync()
     await assertion
+  })
+
+  it('H. campo estoque malformado (lista ausente / entrada sem estoqueFisico / tipo nao-numerico): fail-closed em todos os casos', async () => {
+    const { readWakeStockByVariantId } = await import('./client')
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, JSON.stringify({ estoqueFisico: 10, estoqueReservado: 0 })))
+    expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, stockResponse({ cds: [{ centroDistribuicaoId: 25 }] })))
+    expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, stockResponse({ cds: [{ centroDistribuicaoId: 25, estoqueFisico: '42' }] })))
+    expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
   })
 })
