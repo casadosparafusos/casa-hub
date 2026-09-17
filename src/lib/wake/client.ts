@@ -192,11 +192,20 @@ function normalizeStockUpdateResponse(raw: unknown): WakeStockUpdateResponse {
  * devolvido tipado (WakeStockUpdateResponse) em vez de cru: descobrimos em
  * 10/09/2026 que esse endpoint ja da o ack definitivo por variante
  * (`resultado` + `detalhes` dentro de produtosAtualizados /
- * produtosNaoAtualizados). Esse ack e a fonte de verdade da reconferencia de
- * estoque em src/lib/sync/engine.ts -- NAO da pra reconferir estoque por
- * releitura, porque GET /produtos/{sku} nunca devolve `estoque` preenchido e
- * `dataAtualizacao` so anda em escrita de catalogo/preco, nunca em escrita de
- * estoque (ver o comentario longo em syncStock()).
+ * produtosNaoAtualizados).
+ *
+ * FASE C.1 (17/09/2026): esse ack sozinho NAO e mais suficiente pra marcar
+ * 'applied' -- e sinal de que o Wake ACEITOU a chamada, nao de que o estado
+ * remoto de fato ficou no valor esperado (regra canonica: "writer 2xx/ACK !=
+ * estado remoto verificado"). syncStock() agora usa o ack so como triagem
+ * (rejeitado no ack -> falha direto, sem gastar uma leitura) e, pro que foi
+ * aceito, faz uma releitura REAL via readWakeStockByVariantId() antes de
+ * confirmar 'applied'. Ate 17/09/2026 o codigo achava que `GET /produtos/{sku}`
+ * (unico endpoint testado na epoca) era a unica forma de reler estoque, e
+ * como ele sempre devolve `estoque: []`, a reconferencia por leitura parecia
+ * impossivel -- daí o ack-only. readWakeStockByVariantId() usa outro
+ * endpoint (`GET /produtos`, listagem/catalogo) que de fato devolve
+ * `estoque[]` quando `camposAdicionais=Estoque` e pedido (ver comentario la).
  */
 export async function updateWakeStock(items: WakeStockUpdateItem[]): Promise<WakeStockUpdateResponse> {
   if (items.length > 50) throw new Error('updateWakeStock: lote maior que 50 -- particione antes de chamar')
@@ -402,4 +411,88 @@ export async function getWakeProductBySku(sku: string): Promise<WakeProductLooku
     if (err instanceof WakePermanentError && /\b422\b/.test(err.message)) return null
     throw err
   }
+}
+
+// --- Estoque (leitura pos-escrita, FASE C.2 §2/§3/§4) -----------------------
+
+/** Uma entrada por centro de distribuicao dentro da resposta do endpoint dedicado de estoque. */
+export interface WakeStockByCdEntry {
+  centroDistribuicaoId?: number
+  nome?: string
+  estoqueFisico?: number
+  estoqueReservado?: number
+  [key: string]: unknown
+}
+
+/**
+ * Corpo de resposta de GET /produtos/{identificador}/estoque. Schema
+ * confirmado ao vivo em 17/09/2026 direto do OAS oficial (nao do texto da
+ * doc, que so mostra o preview renderizado) via
+ * `GET https://wakecommerce.readme.io/wakecommerce/api-next/v2/branches/1.0-readme/reference/retorna-o-estoque-total-e-o-estoque-por-centro-de-distribuicao?reduce=false`,
+ * schema.paths["/produtos/{identificador}/estoque"].get.responses.200.
+ * `estoqueFisico`/`estoqueReservado` de topo sao o TOTAL agregado entre
+ * todos os CDs -- NUNCA usar pra validar a escrita de um CD especifico (ver
+ * §3 do relatorio FASE C.2). O estoque por CD vive em
+ * `listProdutoVarianteCentroDistribuicaoEstoque[]`.
+ */
+interface WakeStockReadResponse {
+  estoqueFisico?: number
+  estoqueReservado?: number
+  listProdutoVarianteCentroDistribuicaoEstoque?: WakeStockByCdEntry[]
+  [key: string]: unknown
+}
+
+/**
+ * GET /produtos/{identificador}/estoque?tipoIdentificador=ProdutoVarianteId --
+ * endpoint OFICIAL DEDICADO de consulta pontual de estoque (substitui, na
+ * FASE C.2, o uso de `GET /produtos` + cursor `produtoVarianteIdDe` da FASE
+ * C.1 -- ver docs/WAKE-API-CONTRATOS.md pro historico). Confirmado ao vivo
+ * em 17/09/2026 na doc oficial (wakecommerce.readme.io): path, query param
+ * `tipoIdentificador` (enum `Sku`|`ProdutoVarianteId`) e o schema de
+ * resposta completo (ver WakeStockReadResponse acima). Reaproveita
+ * wakeRequest() -- mesmo auth/retry/backoff/timeout/rate-limit/error-handling
+ * de todo o cliente Wake, nenhum cliente HTTP paralelo.
+ *
+ * Selecao do CD: estritamente `centroDistribuicaoId === cdId` dentro de
+ * `listProdutoVarianteCentroDistribuicaoEstoque[]`. Se o CD esperado nao
+ * aparecer nessa lista, devolve `null` (nao verificavel) -- NUNCA aceita o
+ * total agregado do topo como substituto, e nunca considera silenciosamente
+ * `0`.
+ *
+ * Campo comparado: `estoqueFisico` da entrada do CD. Auditado contra o
+ * writer (`updateWakeStock()` acima, `WakeStockUpdateItem.listaEstoque[]`):
+ * o writer grava exatamente `estoqueFisico` por CD, entao writer e reader
+ * comparam o MESMO campo/semantica -- nao ha necessidade de ajuste (ver §4
+ * do relatorio). `estoqueReservado` nunca e subtraido nem comparado aqui --
+ * documentado a parte (relatorio FASE C.2, secao Semantics).
+ *
+ * Retorna `null` pra qualquer caso NAO verificavel, nunca aceitando
+ * silenciosamente um valor incerto:
+ *   - 404 ("Produto Nao Encontrado" -- identificador nao existe na Wake);
+ *   - campo `listProdutoVarianteCentroDistribuicaoEstoque` ausente/nao-array;
+ *   - nenhuma entrada da lista com `centroDistribuicaoId === cdId`;
+ *   - `estoqueFisico` da entrada do CD ausente, nao-numerico ou nao-finito.
+ * Erro de rede/protocolo (WakeClientError transiente ou permanente que nao
+ * seja 404) propaga pro chamador -- quem chama trata esse throw como
+ * FAILED, nunca como MISMATCH (ver syncStock()). 404 nunca e retentado --
+ * wakeRequest() so retenta 429/5xx/timeout, um 404 cai direto no ramo
+ * `!res.ok` e lanca de primeira (ver comentario de wakeRequest() acima).
+ */
+export async function readWakeStockByVariantId(variantId: number, cdId: number): Promise<number | null> {
+  let response: WakeStockReadResponse
+  try {
+    response = await wakeRequest<WakeStockReadResponse>('GET', `/produtos/${variantId}/estoque`, {
+      params: { tipoIdentificador: 'ProdutoVarianteId' },
+    })
+  } catch (err) {
+    if (err instanceof WakePermanentError && /\b404\b/.test(err.message)) return null
+    throw err
+  }
+
+  const list = response?.listProdutoVarianteCentroDistribuicaoEstoque
+  if (!Array.isArray(list)) return null
+
+  const entry = list.find((e) => e.centroDistribuicaoId === cdId)
+  if (!entry || typeof entry.estoqueFisico !== 'number' || !Number.isFinite(entry.estoqueFisico)) return null
+  return entry.estoqueFisico
 }

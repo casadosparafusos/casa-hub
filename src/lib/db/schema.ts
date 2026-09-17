@@ -197,7 +197,14 @@ export const syncRunItems = sqliteTable(
     wakeBeforeRaw: text('wake_before_raw'), // JSON snapshot da leitura de verificacao (sem token)
     wakeAfterRaw: text('wake_after_raw'),
 
-    status: text('status', { enum: ['no_change', 'planned', 'applied', 'failed', 'skipped'] }).notNull(),
+    // 'mismatch' (FASE C §6): distinto de 'failed' -- o Wake aceitou a
+    // chamada de escrita sem erro, mas a reconferencia (leitura/ACK) achou
+    // um valor diferente do enviado. 'failed' continua reservado pra falha
+    // da propria chamada (erro HTTP/timeout) ou reconferencia que nao
+    // encontrou o item de jeito nenhum. Sem CHECK no SQL (so tipo em TS,
+    // igual todo o resto deste enum) -- adicionar este valor nao exige
+    // migration.
+    status: text('status', { enum: ['no_change', 'planned', 'applied', 'failed', 'mismatch', 'skipped'] }).notNull(),
     errorMessage: text('error_message'),
 
     createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),

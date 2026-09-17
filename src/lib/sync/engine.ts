@@ -15,6 +15,7 @@ import {
   addWakePriceTableProducts,
   updateWakePriceTableProducts,
   getWakeProductBySku,
+  readWakeStockByVariantId,
   WakeClientError,
   type WakePriceUpdateItem,
   type WakeStockUpdateItem,
@@ -104,6 +105,21 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
   const { kind, trigger, triggeredBy, dryRun } = options
 
   if (!dryRun) {
+    // FASE C §3: motor nunca pode escrever no Wake com o provider de preco
+    // em modo mock -- sinal de ambiente nao pronto pra producao (ver
+    // src/lib/ciss/price-provider.ts, unico switch mock/live do codebase).
+    // Vale pro run inteiro (price/stock/both), nao so pra 'price': um
+    // ambiente com preco mockado nao e um ambiente onde faz sentido confiar
+    // em nenhuma escrita real. Recusa ANTES de criar a sync_run, igual o
+    // check de REQUIRED_UNCONFIRMED_KEYS abaixo.
+    const activeProvider = getActivePriceProvider()
+    if (activeProvider.name === 'mock') {
+      throw new Error(
+        'MOCK_PROVIDER_WRITE_BLOCKED: CISS_PRICE_PROVIDER=mock nao pode gravar no Wake fora de dry-run. ' +
+          'Configure CISS_PRICE_PROVIDER=live ou rode com dryRun=true.',
+      )
+    }
+
     const { missing } = await checkRequiredUnconfirmed()
     if (missing.length > 0) {
       throw new Error(
@@ -459,12 +475,19 @@ async function syncPrices(
       // marcar 'applied' (ver comentario de WAKE_VERIFY_DELAY_MS acima).
       for (const b of batch) {
         let verified = false
+        // FASE C §5/§6: 'mismatch' = Wake respondeu e o valor la e outro
+        // (escrita foi aceita, mas divergiu) -- distinto de 'failed', que
+        // fica reservado pra erro de fato (produto sumiu na reconferencia
+        // ou a propria leitura falhou). Ver mesmo criterio no bloco da
+        // Tabela 74 mais abaixo.
+        let mismatch = false
         let verifyDetail = ''
         try {
           const live = await getWakeProductBySku(b.product.wakeSku)
           if (live && live.precoPor === b.unitPrice) {
             verified = true
           } else if (live) {
+            mismatch = true
             verifyDetail = `Wake ainda mostra precoPor=${live.precoPor} (esperado ${b.unitPrice})`
           } else {
             verifyDetail = 'produto nao encontrado no Wake na reconferencia'
@@ -501,8 +524,8 @@ async function syncPrices(
             sourceNewValue: b.sourceNewValue,
             targetOldValue: b.targetOldValue,
             targetNewValue: b.unitPrice,
-            status: 'failed',
-            errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia nao confirmou -- ${verifyDetail}`,
+            status: mismatch ? 'mismatch' : 'failed',
+            errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia ${mismatch ? 'encontrou valor diferente' : 'nao confirmou'} -- ${verifyDetail}`,
             wakeAfterRaw: putResponseRaw,
           })
         }
@@ -525,10 +548,39 @@ async function syncPrices(
       try {
         if (toUpdate.length > 0) await updateWakePriceTableProducts(priceTableId, toUpdate)
         if (toAdd.length > 0) await addWakePriceTableProducts(priceTableId, toAdd)
+
+        // FASE C §9: updateWakePriceTableProducts/addWakePriceTableProducts
+        // nao devolvem ACK por item (void, ver src/lib/wake/client.ts) --
+        // diferente do preco unitario (GET /produtos/{sku}) e do estoque
+        // (ACK do proprio PUT), o unico jeito de confirmar aqui e reler a
+        // Tabela de Preco inteira, igual fetchPriceTableEntries() ja faz no
+        // topo desta funcao pra montar o diff. Sem isto o bug historico do
+        // SKU 7648 (escrita aceita sem erro, valor no Wake nunca mudou)
+        // ficava sem protecao nenhuma neste caminho.
+        const verifyEntries = await fetchPriceTableEntries(priceTableId)
         for (const b of batch) {
           changed++
-          applied++
-          await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
+          const entry = verifyEntries.get(b.product.wakeSku)
+          const verified = entry !== undefined && entry.precoPor === b.precoPor && entry.precoDe === b.precoDe
+          if (verified) {
+            applied++
+            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
+          } else {
+            failed++
+            const detail =
+              entry === undefined
+                ? 'SKU nao encontrado na Tabela de Preco apos a escrita'
+                : `Tabela de Preco mostra precoPor=${entry.precoPor}/precoDe=${entry.precoDe} (esperado precoPor=${b.precoPor}/precoDe=${b.precoDe})`
+            await logItem({
+              syncRunId,
+              managedProductId: b.product.id,
+              field: 'special_price',
+              targetOldValue: null,
+              targetNewValue: b.precoPor,
+              status: entry === undefined ? 'failed' : 'mismatch',
+              errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia da Tabela de Preco nao confirmou -- ${detail}`,
+            })
+          }
         }
       } catch (err) {
         for (const b of batch) {
@@ -716,36 +768,41 @@ async function syncStock(
         continue
       }
 
-      // Lote aceito sem erro -- confere item a item pelo ACK POR VARIANTE que
-      // o proprio PUT /produtos/estoques devolve (produtosAtualizados /
+      // Lote aceito sem erro -- primeiro triagem pelo ACK POR VARIANTE que o
+      // proprio PUT /produtos/estoques devolve (produtosAtualizados /
       // produtosNaoAtualizados, cada entrada com produtoVarianteId, sku,
-      // `resultado` e `detalhes`). Ver WakeStockUpdateResponse em
-      // src/lib/wake/client.ts.
+      // `resultado` e `detalhes`. Ver WakeStockUpdateResponse em
+      // src/lib/wake/client.ts). Um item rejeitado no ACK falha direto, sem
+      // gastar uma releitura -- ja se sabe que o Wake recusou.
       //
-      // BUG CORRIGIDO (10/09/2026): antes daqui saia uma reconferencia por
-      // RELEITURA (GET /produtos/{sku}) checando se `dataAtualizacao` tinha
-      // avancado pra depois do inicio da sync. Isso era um falso negativo
-      // permanente, porque:
-      //   1. GET /produtos/{sku} nunca devolve `estoque` preenchido (sempre
-      //      `[]`), entao nao dava pra comparar o valor direto como no preco;
-      //   2. `dataAtualizacao` e timestamp de CATALOGO/PRECO -- escrita de
-      //      estoque (que vive no subsistema de centro de distribuicao) NAO
-      //      encosta nele. Provado em producao: os 102 itens que falhavam
-      //      todo ciclo reportavam todos `dataAtualizacao=2026-09-09T17:52:46`
-      //      (horario local), que e exatamente quando a sync de PRECO da run
-      //      207 rodou -- nenhuma das dezenas de escritas de estoque
-      //      posteriores mexeu naquele campo, mesmo o Wake respondendo
-      //      "atualizado com sucesso" pra todas elas.
-      // Efeito do bug: o item nunca era marcado 'applied', logo
-      // last_applied_wake_stock nunca era gravado, logo a run seguinte
-      // tratava o mesmo produto como "mudou" e reenviava -- laco infinito de
-      // ~105 falhas fantasma por execucao (runs 209..227), enquanto o estoque
-      // no Wake ja estava certo o tempo todo.
+      // FASE C.1 (17/09/2026), BLOQUEIO revisado: ACK sozinho NAO e mais
+      // suficiente pra marcar 'applied'. O ack confirma so que o Wake
+      // ACEITOU processar a chamada -- nao prova que o estado remoto ficou
+      // no valor esperado (regra canonica: "writer 2xx/ACK != estado remoto
+      // verificado"). Ate 17/09/2026 o ack era tratado como prova suficiente
+      // (ver git blame) porque `GET /produtos/{sku}` -- unico endpoint de
+      // releitura conhecido na epoca -- sempre devolve `estoque: []`,
+      // parecendo tornar releitura de estoque impossivel (ver o bug de
+      // `dataAtualizacao` historico abaixo). readWakeStockByVariantId()
+      // (src/lib/wake/client.ts) usa outro endpoint (`GET /produtos`,
+      // listagem/catalogo com `camposAdicionais=Estoque`) que de fato
+      // devolve `estoque[]` populado -- validado ao vivo em producao
+      // (11/09/2026, `c7616d7`, ver scripts/reconcile/wake-reader.ts). Todo
+      // item aceito no ACK agora passa por essa releitura real antes de
+      // 'applied'; ACK aceito + releitura confirma valor -> VERIFIED;
+      // ACK aceito + releitura acha valor diferente -> MISMATCH; ACK aceito
+      // + releitura nao confirma (produto sumiu/campo ausente) ou lanca
+      // erro -> FAILED. `lastAppliedWakeStock` so avanca no caminho VERIFIED.
       //
-      // O ack do lote e sinal DIRETO e por item, vindo do proprio Wake -- e
-      // estritamente melhor que qualquer releitura heuristica, e de brinde
-      // elimina 1 GET por produto alterado (a sync de estoque cheia caiu de
-      // ~35min pra poucos minutos).
+      // BUG HISTORICO (corrigido 10/09/2026, ainda relevante como contexto):
+      // a reconferencia original usava `dataAtualizacao` (GET /produtos/{sku})
+      // pra inferir sucesso -- falso negativo permanente, porque
+      // `dataAtualizacao` e timestamp de CATALOGO/PRECO, nunca de escrita de
+      // estoque (que vive no subsistema de centro de distribuicao). Isso
+      // gerava ~105 falhas fantasma por execucao (runs 209..227) com o
+      // estoque real ja certo no Wake. A troca pra ACK-only nessa mesma data
+      // resolveu o falso negativo, mas trocou por um problema oposto (zero
+      // prova de estado remoto) -- e exatamente o que esta correcao fecha.
       const ackByVariant = new Map<number, WakeStockUpdateResultEntry>()
       const ackBySku = new Map<string, WakeStockUpdateResultEntry>()
       const rejectedByVariant = new Map<number, WakeStockUpdateResultEntry>()
@@ -765,20 +822,59 @@ async function syncStock(
         const ok = (Number.isFinite(variantId) ? ackByVariant.get(variantId) : undefined) ?? ackBySku.get(sku)
         const rejected = (Number.isFinite(variantId) ? rejectedByVariant.get(variantId) : undefined) ?? rejectedBySku.get(sku)
 
-        let verified = false
-        let verifyDetail = ''
+        let ackOk = false
+        let ackDetail = ''
         if (ok && ok.resultado !== false) {
-          verified = true
+          ackOk = true
         } else if (rejected) {
-          verifyDetail = rejected.detalhes
+          ackDetail = rejected.detalhes
             ? `Wake recusou o item: ${rejected.detalhes}`
             : 'Wake listou o item em produtosNaoAtualizados (sem detalhe)'
         } else if (ok) {
           // esta em produtosAtualizados mas com resultado=false -- contraditorio,
           // trata como recusa e mantem o produto na fila da proxima run.
-          verifyDetail = ok.detalhes ? `Wake retornou resultado=false: ${ok.detalhes}` : 'Wake retornou resultado=false para o item'
+          ackDetail = ok.detalhes ? `Wake retornou resultado=false: ${ok.detalhes}` : 'Wake retornou resultado=false para o item'
         } else {
-          verifyDetail = `Wake nao mencionou o item (sku=${sku}, produtoVarianteId=${variantId}) em nenhuma das listas da resposta do lote`
+          ackDetail = `Wake nao mencionou o item (sku=${sku}, produtoVarianteId=${variantId}) em nenhuma das listas da resposta do lote`
+        }
+
+        if (!ackOk) {
+          failed++
+          // NAO atualiza lastAppliedWakeStock -- a proxima run detecta como
+          // "mudou" de novo e tenta reenviar, em vez de travar num falso
+          // "ja aplicado". Sem releitura aqui -- o ACK ja recusou o item.
+          await logItem({
+            syncRunId,
+            managedProductId: b.product.id,
+            field: 'stock',
+            sourceOldValue: b.sourceOldValue,
+            sourceNewValue: b.sourceNewValue,
+            targetOldValue: b.targetOldValue,
+            targetNewValue: b.targetStock,
+            status: 'failed',
+            errorMessage: `Wake nao confirmou este item no ack do lote -- ${ackDetail}`,
+            wakeAfterRaw: putResponseRaw,
+          })
+          continue
+        }
+
+        // ACK aceitou -- mas ACK != estado remoto verificado (FASE C.1).
+        // Rele o valor de fato gravado antes de marcar 'applied'.
+        let verified = false
+        let mismatch = false
+        let readDetail = ''
+        try {
+          const observed = Number.isFinite(variantId) ? await readWakeStockByVariantId(variantId, Number(wakeCdId)) : null
+          if (observed === null) {
+            readDetail = 'releitura nao confirmou o item (produto nao encontrado nessa posicao, ou campo estoque[] ausente/sem entrada pro CD configurado)'
+          } else if (observed === b.targetStock) {
+            verified = true
+          } else {
+            mismatch = true
+            readDetail = `Wake devolveu estoqueFisico=${observed} na releitura (esperado ${b.targetStock})`
+          }
+        } catch (err) {
+          readDetail = `falha na releitura: ${err instanceof WakeClientError ? err.message : String(err)}`
         }
 
         if (verified) {
@@ -799,7 +895,7 @@ async function syncStock(
           failed++
           // NAO atualiza lastAppliedWakeStock -- mesma logica do preco:
           // sem isso, a proxima run trataria esse produto como "ja
-          // aplicado" e nunca mais tentaria reenviar.
+          // aplicado" e nunca mais tentaria reenviar/reconferir.
           await logItem({
             syncRunId,
             managedProductId: b.product.id,
@@ -808,18 +904,21 @@ async function syncStock(
             sourceNewValue: b.sourceNewValue,
             targetOldValue: b.targetOldValue,
             targetNewValue: b.targetStock,
-            status: 'failed',
-            errorMessage: `Wake aceitou a chamada, mas nao confirmou este item -- ${verifyDetail}`,
+            status: mismatch ? 'mismatch' : 'failed',
+            errorMessage: `Wake aceitou a escrita (ack), mas a releitura ${mismatch ? 'encontrou valor diferente' : 'nao confirmou'} -- ${readDetail}`,
             wakeAfterRaw: putResponseRaw,
           })
         }
-      }
 
-      // Pausa ENTRE LOTES (nao mais por item -- nao ha releitura por item
-      // desde o fix de 10/09/2026). Mantem a taxa bem abaixo dos 120 req/min
-      // do Wake mesmo com o catalogo inteiro: ~47 lotes de 50 = ~30s de pausa
-      // somada, em vez dos ~25min que as reconferencias por item custavam.
-      await sleep(WAKE_VERIFY_DELAY_MS)
+        // Pausa POR ITEM releido (nao por lote) -- mesmo padrao ja usado e
+        // ja revisado pra preco (ver WAKE_VERIFY_DELAY_MS acima): agora que
+        // estoque tambem faz 1 GET real por item aceito no ack, o volume de
+        // leitura fica na mesma ordem de grandeza ja aceita pra preco, sem
+        // inventar mecanismo de concorrencia novo (FASE C.1 §8). Itens
+        // recusados no ack (`continue` acima) nao chegam aqui -- nao gastam
+        // pausa porque nao gastaram leitura.
+        await sleep(WAKE_VERIFY_DELAY_MS)
+      }
     }
   }
 

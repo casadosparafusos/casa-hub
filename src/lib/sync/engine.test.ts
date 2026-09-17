@@ -34,8 +34,13 @@ const mockGetRetailPrices = vi.fn<(ids: string[]) => Promise<Map<string, number>
 const mockFetchStockForProducts =
   vi.fn<(ids: string[], opts: { enterprise: number; location: number }) => Promise<Array<{ productId: string; stock: number; unitRaw?: string | null; noRecord?: boolean }>>>()
 
+// FASE C §3: 'live' por default -- os testes de escrita real (dryRun:false)
+// ja existentes nao podem ser bloqueados pelo novo guard
+// MOCK_PROVIDER_WRITE_BLOCKED. Sobrescrito so pelos testes que exercitam o
+// guard em si (ver describe dedicado abaixo).
+let activePriceProviderName: 'mock' | 'live' = 'live'
 vi.mock('../ciss/price-provider', () => ({
-  getActivePriceProvider: () => ({ getRetailPrices: mockGetRetailPrices }),
+  getActivePriceProvider: () => ({ name: activePriceProviderName, getRetailPrices: mockGetRetailPrices }),
 }))
 
 vi.mock('../ciss/stock', () => ({
@@ -63,6 +68,11 @@ const mockGetWakeProductBySku = vi.fn<(sku: string) => Promise<{ precoPor?: numb
 const mockGetWakePriceTableProducts = vi.fn<(tabelaPrecoId: number, params?: { pagina?: number; quantidadeRegistros?: number }) => Promise<Array<{ sku: string; precoDe: number; precoPor: number }>>>()
 const mockAddWakePriceTableProducts = vi.fn<(tabelaPrecoId: number, items: Array<{ sku: string; precoDe: number; precoPor: number }>) => Promise<void>>()
 const mockUpdateWakePriceTableProducts = vi.fn<(tabelaPrecoId: number, items: Array<{ sku: string; precoDe: number; precoPor: number }>) => Promise<void>>()
+// FASE C.1 §2/§3: sem este mock, qualquer teste dryRun:false que chegue no
+// ramo ACK-aceito do estoque cairia no `...actual` e dispararia uma chamada
+// de rede de verdade (readWakeStockByVariantId real) -- ver descoberta do
+// gap de mock antes de escrever os testes de estoque desta rodada.
+const mockReadWakeStockByVariantId = vi.fn<(variantId: number, cdId: number) => Promise<number | null>>()
 
 vi.mock('../wake/client', async () => {
   const actual = await vi.importActual<typeof import('../wake/client')>('../wake/client')
@@ -74,6 +84,7 @@ vi.mock('../wake/client', async () => {
     getWakePriceTableProducts: (...args: Parameters<typeof mockGetWakePriceTableProducts>) => mockGetWakePriceTableProducts(...args),
     addWakePriceTableProducts: (...args: Parameters<typeof mockAddWakePriceTableProducts>) => mockAddWakePriceTableProducts(...args),
     updateWakePriceTableProducts: (...args: Parameters<typeof mockUpdateWakePriceTableProducts>) => mockUpdateWakePriceTableProducts(...args),
+    readWakeStockByVariantId: (...args: Parameters<typeof mockReadWakeStockByVariantId>) => mockReadWakeStockByVariantId(...args),
   }
 })
 
@@ -146,6 +157,7 @@ beforeEach(async () => {
   await db.delete(schema.jobLocks)
   mockGetRetailPrices.mockReset()
   mockFetchStockForProducts.mockReset()
+  activePriceProviderName = 'live'
   process.env.WAKE_CD_ID = '25'
 
   // Escritores Wake reais -- so tem efeito em testes com dryRun:false
@@ -157,6 +169,7 @@ beforeEach(async () => {
   mockGetWakePriceTableProducts.mockReset().mockResolvedValue([])
   mockAddWakePriceTableProducts.mockReset().mockResolvedValue(undefined)
   mockUpdateWakePriceTableProducts.mockReset().mockResolvedValue(undefined)
+  mockReadWakeStockByVariantId.mockReset().mockResolvedValue(null)
   unitPriceOverride = null
 
   // Os 5 REQUIRED_UNCONFIRMED_KEYS (ver src/lib/settings.ts) -- so
@@ -330,6 +343,7 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 12.5 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(7) // FASE C.1: releitura precisa confirmar o valor enviado pra virar 'applied'
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -378,6 +392,13 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
+    // 1a chamada (topo de syncPrices, monta o diff): tabela vazia -- produto
+    // ainda nao existe la, vai por addWakePriceTableProducts. 2a chamada
+    // (FASE C §9, reconferencia pos-escrita): tabela ja reflete o item
+    // recem-adicionado -- senao o novo readback marcaria 'failed'/'mismatch'
+    // e este teste, que so quer provar o payload do Wake, quebraria.
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-CT-WRITE', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -424,6 +445,7 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 17, unitRaw: 'KG' }])
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 50 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(3) // FASE C.1: releitura confirma o estoque enviado (floor(17/5))
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -469,6 +491,7 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 9, unitRaw: 'MT' }])
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 32 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(2) // FASE C.1: releitura confirma o estoque enviado (floor(9/4))
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -507,6 +530,7 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -597,6 +621,415 @@ describe('runSync -- linha de estoque ausente no CISS nunca vira DIRECT nem escr
 
     expect(mockUpdateWakePrices).not.toHaveBeenCalled()
     expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+})
+
+describe('runSync -- MOCK_PROVIDER_WRITE_BLOCKED (FASE C §3/§4)', () => {
+  it('dryRun=false com CISS_PRICE_PROVIDER=mock: recusa ANTES de criar sync_run, zero chamada a qualquer escritor Wake', async () => {
+    activePriceProviderName = 'mock'
+    const product = await insertProduct({ wakeSku: 'SKU-MOCK-BLOCKED' })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+
+    await expect(runSync({ kind: 'both', trigger: 'manual', dryRun: false })).rejects.toThrow('MOCK_PROVIDER_WRITE_BLOCKED')
+
+    // Mesmo criterio do check de REQUIRED_UNCONFIRMED_KEYS: recusa antes de
+    // criar a sync_run, entao nao sobra rastro de uma run que nunca rodou.
+    const runs = await db.select().from(schema.syncRuns)
+    expect(runs).toHaveLength(0)
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+
+  it('dryRun=true com CISS_PRICE_PROVIDER=mock: guard nao se aplica -- calcula e planeja normalmente, zero escrita', async () => {
+    activePriceProviderName = 'mock'
+    const product = await insertProduct({ wakeSku: 'SKU-MOCK-DRYRUN' })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.status).toBe('success')
+    expect(result.failedProducts).toBe(0)
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+})
+
+describe('runSync -- distincao MISMATCH vs FAILED na reconferencia de preco (FASE C §5/§6/§7)', () => {
+  it('Wake aceita o PUT sem erro mas a releitura mostra outro valor: status mismatch (nao failed); lastApplied* nao avanca', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-PRICE-MISMATCH' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+    // Wake aceita a chamada (updateWakePrices resolve normal), mas a
+    // releitura devolve um precoPor diferente do enviado (10) -- reproduz o
+    // caso do SKU 7648 no caminho do preco unitario base.
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 9.5 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const priceItem = items.find((i) => i.field === 'unit_price')
+    expect(priceItem?.status).toBe('mismatch')
+    expect(priceItem?.errorMessage).toContain('encontrou valor diferente')
+    expect(priceItem?.errorMessage).toContain('precoPor=9.5')
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeUnitPrice).toBeNull()
+  })
+
+  it('Wake aceita o PUT mas o produto some na releitura: continua failed (nao mismatch)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-PRICE-VANISHED' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue(null)
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const priceItem = items.find((i) => i.field === 'unit_price')
+    expect(priceItem?.status).toBe('failed')
+    expect(priceItem?.errorMessage).toContain('nao confirmou')
+  })
+})
+
+describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () => {
+  it('escrita aceita e releitura confirma precoPor/precoDe: status applied', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-OK' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-T74-OK', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(tableItem?.status).toBe('applied')
+    expect(result.status).toBe('success')
+  })
+
+  it('escrita aceita mas a releitura mostra outro valor na tabela: status mismatch, run nao fica success', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-MISMATCH' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    // Escrita aceita sem erro, mas a Tabela 74 continua mostrando o preco
+    // antigo na releitura -- reproduz o bug historico do SKU 7648 (escrita
+    // aceita, valor no Wake nunca mudou), agora pego pelo readback: antes
+    // do FASE C isto seria marcado 'applied' sem nenhuma verificacao.
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-T74-MISMATCH', precoDe: moneyRound(3 * 1.3), precoPor: 3 }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(tableItem?.status).toBe('mismatch')
+    expect(tableItem?.errorMessage).toContain('Tabela de Preco mostra')
+    expect(result.status).not.toBe('success')
+  })
+
+  it('escrita aceita mas o SKU nao aparece na releitura: status failed (nao mismatch)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-GONE' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(tableItem?.status).toBe('failed')
+    expect(tableItem?.errorMessage).toContain('nao encontrado na Tabela de Preco')
+  })
+
+  it('N SKUs alterados na Tabela 74 geram 1 + numero-de-lotes releituras, nunca 1 por SKU (FASE C.1 §7 -- audita o BLOCKER de performance da revisao do PR #3)', async () => {
+    const products = await Promise.all([1, 2, 3].map((i) => insertProduct({ wakeSku: `SKU-T74-BATCH-${i}` })))
+    const variantIds = products.map((p) => Number(p.wakeProductVariantId))
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({
+      produtosAtualizados: variantIds.map((variantId) => ({ produtoVarianteId: variantId, resultado: true })),
+      produtosNaoAtualizados: [],
+    })
+    mockReadWakeStockByVariantId.mockResolvedValue(20)
+    // 1a chamada (diff inicial, topo de syncPrices): tabela vazia -- os 3
+    // produtos cabem num unico lote de escrita (WAKE_BATCH_SIZE=50, bem acima
+    // de 3), entao a releitura pos-escrita (FASE C §9) tambem e 1 unica
+    // chamada, nao 3. Total esperado: 1 (diff) + 1 (lote) = 2 -- NUNCA
+    // 1 + 3 (que seria releitura por SKU, o padrao que o §7 classifica como
+    // BLOCKER).
+    mockGetWakePriceTableProducts
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(products.map((p) => ({ sku: p.wakeSku, precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })))
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(2)
+    expect(result.status).toBe('success')
+  })
+})
+
+describe('runSync -- distincao VERIFIED/MISMATCH/FAILED na reconferencia de estoque (FASE C.1 §2/§4/§5 -- BLOQUEIO PRINCIPAL da revisao do PR #3)', () => {
+  it('A: ack aceito + releitura real confirma o valor enviado -> applied, lastAppliedWakeStock avanca', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCK-VERIFIED' })
+    const variantId = Number(product.wakeProductVariantId)
+    await db.insert(schema.syncProductState).values({ managedProductId: product.id, lastAppliedWakeStock: 5 })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(7)
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    expect(stockItem?.status).toBe('applied')
+    expect(mockReadWakeStockByVariantId).toHaveBeenCalledWith(variantId, 25)
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeStock).toBe(7)
+  })
+
+  it('B: ack aceito mas a releitura real acha valor diferente -> mismatch (nao failed), lastAppliedWakeStock NAO avanca', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCK-MISMATCH' })
+    const variantId = Number(product.wakeProductVariantId)
+    await db.insert(schema.syncProductState).values({ managedProductId: product.id, lastAppliedWakeStock: 5 })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    // Wake aceita o PUT (ack ok) mas a releitura real mostra outro valor --
+    // e exatamente a classe de bug que o ACK-only (pre-FASE C.1) nunca
+    // conseguia detectar.
+    mockReadWakeStockByVariantId.mockResolvedValue(3)
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    expect(stockItem?.status).toBe('mismatch')
+    expect(stockItem?.errorMessage).toContain('encontrou valor diferente')
+    expect(stockItem?.errorMessage).toContain('estoqueFisico=3')
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeStock).toBe(5)
+  })
+
+  it('C: Wake recusa o item no ack do lote -> failed, sem gastar nenhuma releitura, lastAppliedWakeStock NAO avanca', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCK-ACK-REJECTED' })
+    const variantId = Number(product.wakeProductVariantId)
+    await db.insert(schema.syncProductState).values({ managedProductId: product.id, lastAppliedWakeStock: 5 })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+    mockUpdateWakeStock.mockResolvedValue({
+      produtosAtualizados: [],
+      produtosNaoAtualizados: [{ produtoVarianteId: variantId, resultado: false, detalhes: 'Produto bloqueado' }],
+    })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    expect(stockItem?.status).toBe('failed')
+    expect(stockItem?.errorMessage).toContain('nao confirmou este item no ack do lote')
+    // Item recusado no ACK nunca gasta uma releitura -- ja se sabe que o
+    // Wake recusou (ver comentario em syncStock()).
+    expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeStock).toBe(5)
+  })
+
+  it('D: ack aceito mas a releitura lanca erro de rede/protocolo -> failed (nunca mismatch), lastAppliedWakeStock NAO avanca', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCK-READBACK-THROWS' })
+    const variantId = Number(product.wakeProductVariantId)
+    await db.insert(schema.syncProductState).values({ managedProductId: product.id, lastAppliedWakeStock: 5 })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockRejectedValue(new Error('ECONNRESET'))
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    // Erro na PROPRIA releitura nunca vira 'mismatch' -- so um valor
+    // diferente confirmado conta como mismatch; erro de rede/protocolo e
+    // sempre 'failed', igual ao padrao ja usado pra preco e Tabela 74.
+    expect(stockItem?.status).toBe('failed')
+    expect(stockItem?.errorMessage).toContain('nao confirmou')
+    // erro generico (nao WakeClientError) passa por String(err), que
+    // prefixa "Error: " -- so WakeClientError usa err.message puro.
+    expect(stockItem?.errorMessage).toContain('falha na releitura:')
+    expect(stockItem?.errorMessage).toContain('ECONNRESET')
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeStock).toBe(5)
+  })
+
+  it('E: estoque calculado ja igual ao ultimo aplicado -> no_change, zero chamada a escritor ou releitura de estoque', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCK-NOOP' })
+    await db.insert(schema.syncProductState).values({ managedProductId: product.id, lastAppliedWakeStock: 7 })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    expect(stockItem?.status).toBe('no_change')
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeStock).toBe(7)
+  })
+
+  it('F: dry-run com estoque divergente -> planned, zero escritor/releitura real, lastAppliedWakeStock intocado', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCK-DRYRUN-DIVERGE' })
+    await db.insert(schema.syncProductState).values({ managedProductId: product.id, lastAppliedWakeStock: 5 })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 7, unitRaw: 'PC' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    expect(stockItem?.status).toBe('planned')
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeStock).toBe(5) // dry-run nunca toca lastApplied*
+  })
+})
+
+describe('runSync -- fail-closed consolidado: zero escritor Wake pra qualquer motivo de recusa, numa unica run (FASE C.1 §9)', () => {
+  it('UNSUPPORTED_UNIT + CONFIGURATION_REQUIRED (KG sem config) + NO_STOCK_RECORD misturados numa unica run: nenhum aciona qualquer escritor', async () => {
+    const unsupported = await insertProduct({ wakeSku: 'SKU-FC-UNSUPPORTED' })
+    const configRequired = await insertProduct({ wakeSku: 'SKU-FC-CONFIGREQ' })
+    const noRecord = await insertProduct({ wakeSku: 'SKU-FC-NORECORD' })
+
+    mockGetRetailPrices.mockResolvedValue(
+      new Map([
+        [unsupported.cissProductId, 10],
+        [configRequired.cissProductId, 10],
+        [noRecord.cissProductId, 10],
+      ]),
+    )
+    mockFetchStockForProducts.mockResolvedValue([
+      { productId: unsupported.cissProductId, stock: 10, unitRaw: 'XYZ' },
+      { productId: configRequired.cissProductId, stock: 17, unitRaw: 'KG' },
+      { productId: noRecord.cissProductId, stock: 0, noRecord: true, unitRaw: null },
+    ])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(result.appliedProducts).toBe(0)
+    expect(result.failedProducts).toBe(6) // 3 produtos * (preco + estoque)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    expect(items.every((i) => i.status === 'failed')).toBe(true)
+
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockGetWakeProductBySku).not.toHaveBeenCalled()
+    expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+})
+
+describe('runSync -- dry-run consolidado: zero escritor Wake e lastApplied* intocado, mesmo com preco/estoque/Tabela 74 todos divergentes (FASE C.1 §10)', () => {
+  it('produto CT+FIXADOR_CENTO com preco, estoque e Tabela 74 todos divergentes do estado anterior: dryRun=true nao escreve nada em lugar nenhum', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-DRYRUN-ALL-DIVERGE' })
+    await db.insert(schema.syncProductState).values({
+      managedProductId: product.id,
+      lastAppliedWakeUnitPrice: 2,
+      lastAppliedWakeSpecialPrice: 1.5,
+      lastAppliedWakeStock: 5,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.status).toBe('success')
+    expect(result.appliedProducts).toBe(0)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    expect(items.every((i) => i.status === 'planned')).toBe(true)
+
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockGetWakeProductBySku).not.toHaveBeenCalled()
+    expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockGetWakePriceTableProducts).not.toHaveBeenCalled()
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.lastAppliedWakeUnitPrice).toBe(2)
+    expect(state?.lastAppliedWakeSpecialPrice).toBe(1.5)
+    expect(state?.lastAppliedWakeStock).toBe(5)
+  })
+})
+
+describe('runSync -- idempotencia: segunda run com os mesmos dados de origem e no-op (FASE C §10)', () => {
+  it('rodar duas vezes seguidas sem mudanca no ERP: 2a run nao chama nenhum escritor Wake nem duplica na Tabela 74', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-IDEMPOTENT' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-IDEMPOTENT', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
+
+    const firstRun = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+    expect(firstRun.status).toBe('success')
+    expect(mockUpdateWakePrices).toHaveBeenCalledTimes(1)
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
+
+    // 2a run: mesmo CISS, mesmo Wake -- sync_product_state ja reflete o
+    // valor aplicado (lastApplied*) e a Tabela 74 ja mostra o item presente
+    // com o mesmo preco -- nada deveria ser reenviado.
+    mockUpdateWakePrices.mockClear()
+    mockUpdateWakeStock.mockClear()
+    mockReadWakeStockByVariantId.mockClear()
+    mockAddWakePriceTableProducts.mockClear()
+    mockUpdateWakePriceTableProducts.mockClear()
+    mockGetWakePriceTableProducts.mockReset().mockResolvedValue([{ sku: 'SKU-IDEMPOTENT', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
+
+    const secondRun = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+    expect(secondRun.status).toBe('success')
+    expect(secondRun.changedProducts).toBe(0)
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    // FASE C.1 §11: idempotencia tambem cobre o novo caminho de releitura de
+    // estoque -- lastAppliedWakeStock ja bate com o calculado (stockUnchanged),
+    // entao a 2a run nem chega a tentar escrever nem a releitura real.
+    expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
     expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
     expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
   })

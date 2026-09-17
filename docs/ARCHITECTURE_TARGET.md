@@ -117,7 +117,9 @@ O comportamento real de atacarejo (>=100 unidades) hoje depende inteiramente do 
 - Storefront `prices.wholesalePrices` — exposição pro cliente final do atacarejo nativo, **não escrito por este app**;
 - promoção 10365 (`WAKE_PROMOTION_ID`): hoje só usada como settings/gate de UI, **nunca referenciada em write real**; semântica completa (condição 4, ação 2, escopo) ainda `UNVERIFIED` (ver `RECONCILIATION_READONLY.md`) — não alterada nesta fase.
 
-### Pendência explícita FASE C (READ-ONLY, antes de qualquer remediation/write)
+### Pendência explícita FASE D (READ-ONLY, antes de qualquer remediation/write)
+
+Renomeada de "FASE C" (nome usado nesta seção antes de 17/09/2026) para não colidir com a FASE C real (guards de produção + read-after-write + estados, ver seção abaixo) — decisão explícita do pedido que abriu a FASE C, que instruiu não tocar na promoção 10365 nesta rodada e adiar esta pendência para a próxima letra.
 
 ```text
 - ler promoção 10365 (condição/ativo/vigência/percentual/escopo);
@@ -126,6 +128,132 @@ O comportamento real de atacarejo (>=100 unidades) hoje depende inteiramente do 
 - validar checkout 1/99/100/101 em janela aprovada;
 - só então decidir remediation/write, com aprovação explícita separada.
 ```
+
+## FASE C — Guards de produção + read-after-write + estados de aplicação (`feat/write-guards-readback`, 17/09/2026)
+
+Converte o motor de sync (canônico por UNIT, FASE B/B.1–B.4) num caminho de escrita operacionalmente seguro, com um modelo de estados explícito por item e sem nenhuma remediação/deploy nesta rodada. Sem merge, sem migration em produção, sem escrita real em Wake/CISS, sem tocar nos 16 produtos PC/KG reais nem na promoção 10365.
+
+### Modelo de estados por item
+
+```text
+DETECTED   -- diff encontrado (ERP != estado esperado no Wake), ainda nada enviado
+  → SENT       -- chamada de escrita emitida (PUT/POST Wake)
+    → READ BACK  -- reconferência pós-escrita executada (GET SKU / GET Tabela 74 / ACK do próprio PUT)
+      → VERIFIED   -- readback confirma o valor enviado            => status 'applied'
+      → MISMATCH   -- Wake aceitou a escrita, mas o valor lido é outro => status 'mismatch'
+      → FAILED     -- a própria chamada de escrita ou a de readback deram erro/não encontraram o item => status 'failed'
+```
+
+Estados de bloqueio (nunca chegam a `DETECTED` — recusam a run ou o item antes de qualquer tentativa de escrita):
+
+- `MOCK_PROVIDER_WRITE_BLOCKED` — run inteira recusada antes de criar `sync_runs`, ver abaixo;
+- `CONFIGURATION_REQUIRED` / `UNSUPPORTED_UNIT` / `NO_STOCK_RECORD` — por item, já existentes desde a FASE B/B.2 (`unit_resolution_status`), fail-closed antes de qualquer cálculo de preço/estoque.
+
+### MISMATCH vs FAILED — por que a distinção importa
+
+Antes da FASE C, qualquer reconferência que não confirmasse o valor enviado virava `'failed'`, sem diferenciar duas causas bem distintas: "o Wake recusou/não achei o item" (falha de infraestrutura, retry faz sentido) vs. "o Wake aceitou a chamada sem erro, mas o valor lá é outro" (o bug histórico do SKU 7648/syncRunId=172 — sintoma de um bug de contrato ou concorrência, não de rede). A partir da FASE C:
+
+- `'mismatch'`: a chamada de escrita teve sucesso (Wake não devolveu erro) **e** a releitura encontrou o item, mas com um valor diferente do enviado;
+- `'failed'`: a própria chamada de escrita deu erro, OU a releitura não encontrou o item / falhou por conta própria (rede, timeout);
+- em ambos os casos `lastApplied*` (`sync_product_state`) **não avança** — a próxima run detecta o item como "mudou" de novo e tenta reenviar, em vez de travar num falso "já aplicado".
+
+Aplicado em três pontos de `syncPrices()`/`syncStock()` (`src/lib/sync/engine.ts`): a reconferência de preço unitário (`getWakeProductBySku`), a reconferência da Tabela de Preço 74 (`fetchPriceTableEntries`, ver abaixo) e, desde a FASE C.1, a reconferência de estoque (`readWakeStockByVariantId`, ver seção "FASE C.1" abaixo). **Nota histórica**: até a FASE C, estoque usava só o ACK do próprio `PUT /produtos/estoques` (`produtosAtualizados`/`produtosNaoAtualizados`) e permanecia `'applied'`/`'failed'` sem estado `'mismatch'`, por não existir releitura real — isso mudou na FASE C.1.
+
+### Read-after-write da Tabela de Preço 74
+
+Lacuna real identificada na auditoria que abriu a FASE C: `updateWakePriceTableProducts`/`addWakePriceTableProducts` (`src/lib/wake/client.ts`) devolvem `void` — sem ACK por item, diferente do preço unitário (GET `/produtos/{sku}`) e do estoque (ACK do próprio PUT). Sem nenhuma leitura pós-escrita, uma falha silenciosa do Wake nesse caminho (aceitar a chamada sem aplicar) nunca seria detectada — exatamente a classe de bug já comprovada no preço unitário (SKU 7648). Corrigido reaproveitando o mesmo `fetchPriceTableEntries(priceTableId)` já usado pra montar o diff no topo de `syncPrices()`: após `updateWakePriceTableProducts`/`addWakePriceTableProducts` retornarem sem erro, a tabela inteira é relida e cada item do lote é comparado (`precoPor`/`precoDe`) contra o valor alvo antes de decidir `applied`/`mismatch`/`failed`.
+
+### Guard `MOCK_PROVIDER_WRITE_BLOCKED`
+
+`runSyncLocked()` (`src/lib/sync/engine.ts`) recusa a run inteira — antes de criar qualquer linha em `sync_runs`, mesmo posicionamento do check de `REQUIRED_UNCONFIRMED_KEYS` — quando `getActivePriceProvider().name === 'mock'` e `dryRun` é `false`, independente de `kind` (`price`/`stock`/`both`). Um provider de preço mockado é sinal de ambiente não pronto pra produção como um todo, não uma questão isolada de preço; `dryRun: true` continua permitido com o provider mockado (nenhuma escrita acontece de qualquer forma).
+
+### Idempotência
+
+Já garantida estruturalmente antes da FASE C pelas comparações `priceUnchanged`/`stockUnchanged`/`tableUnchanged` (que evitam reenviar um valor que já bate com o ERP) — a FASE C adiciona apenas a prova de que isso se sustenta ponta a ponta rodando `runSync()` duas vezes seguidas com a mesma origem, inclusive pelo novo caminho de releitura da Tabela 74: zero chamadas aos 4 writers Wake na segunda run.
+
+### Rate limit e concorrência — escrita + read-after-write (FASE C, §12)
+
+Nenhuma mudança de estratégia de lote nesta fase — a FASE C só adicionou leituras de reconferência aos pontos que já existiam; a tabela abaixo documenta o que já estava implementado e permanece válido:
+
+| Caminho | Lote de escrita | Reconferência | Ritmo |
+|---|---|---|---|
+| Preço unitário | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/precos` | 1 `GET /produtos/{sku}` por item do lote, **serial** (nunca em paralelo) | `sleep(WAKE_VERIFY_DELAY_MS = 650ms)` após cada item — mantém lote+reconferência combinados bem abaixo dos 120 req/min documentados da Wake |
+| Tabela de Preço 74 | `WAKE_BATCH_SIZE = 50` por `PUT`/`POST /tabelaPrecos/{id}/produtos` | 1 `GET /tabelaPrecos/{id}/produtos` paginado por **lote inteiro** (não por item) via `fetchPriceTableEntries()` — mesma função usada pro diff inicial | sem sleep extra por item; o custo por lote já é 1 chamada, não N |
+| Estoque | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/estoques` | ACK do próprio PUT decide `'failed'` imediato (rejeitado no lote); para os aceitos, 1 `GET /produtos/{identificador}/estoque` (endpoint oficial dedicado, `tipoIdentificador=ProdutoVarianteId` — ver "FASE C.2" abaixo) por item via `readWakeStockByVariantId()`, **serial** | `sleep(WAKE_VERIFY_DELAY_MS = 650ms)` após cada releitura de item aceito, mesmo ritmo do preço unitário |
+| Cliente CISS (`src/lib/ciss/client.ts`) | — (só leitura) | — | `MAX_RETRIES = 3`, backoff exponencial `min(1000·2^(tentativa-1), 8000)` ms; retry em 429/5xx/timeout; erro permanente (4xx≠429) nunca repete |
+| Cliente Wake (`src/lib/wake/client.ts`) | — | — | `MAX_RETRIES = 2` (deliberadamente mais conservador que o CISS — ver comentário no topo do arquivo); 429 respeita `Retry-After` do header (default 5s se ausente); 5xx usa backoff fixo `3000ms·tentativa`; **circuito abre** após 5 respostas 429 consecutivas na mesma execução (`consecutiveThrottles`, estado de módulo) e recusa novas chamadas com `WakePermanentError` sem nem tentar a rede — proteção contra o lockout de 1h documentado do token Wake em throttle persistente |
+
+Cobertura de teste do retry/backoff (antes zero, só indireta via mocks de `engine.test.ts`): `src/lib/ciss/client.test.ts` (7 testes) e `src/lib/wake/client.test.ts` (9 testes), incluindo o circuito de throttle da Wake.
+
+## FASE C.1 — Hardening final do read-after-write de estoque, antes do merge do PR #3 (`feat/write-guards-readback`, 17/09/2026)
+
+Fecha o BLOCKER encontrado na revisão de código do Draft PR #3: a reconferência de estoque, único caminho de escrita que ainda dependia só do ACK do writer, sem satisfazer a regra canônica da FASE C ("writer 2xx/ACK != estado remoto verificado"). Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS/início da FASE D.
+
+### `readWakeStockByVariantId` — novo adaptador READ-ONLY de estoque por variante
+
+`src/lib/wake/client.ts` não tinha, até esta fase, nenhuma forma de reler o estoque de uma variante específica pós-escrita (`getWakeProductBySku` cobre preço, não estoque). `readWakeStockByVariantId(variantId, cdId)` reaproveita o endpoint de listagem/catálogo `GET /produtos` (não o de item único) com um truque de cursor exclusivo-ascendente: `produtoVarianteIdDe: variantId - 1`, `quantidadeRegistros: 1`, `camposAdicionais=Estoque`, `centrosDistribuicao={cdId}`. Valida estritamente que o `produtoVarianteId` do item devolvido bate com o pedido — nunca aceita silenciosamente um produto de um gap de ID adjacente — e devolve `number | null` (`null` = não verificável: resposta vazia, campo `estoque[]` ausente, sem entrada pro CD pedido, ou `estoqueFisico` não-numérico). Erro de rede/protocolo (`WakeTransientError`/`WakePermanentError`, ou qualquer exceção não tratada) propaga em vez de virar `null` — o chamador trata isso como `FAILED`, nunca como `MISMATCH` silencioso.
+
+**Nota (FASE C.2)**: esta implementação baseada no endpoint de listagem (`GET /produtos` + cursor `produtoVarianteIdDe`) foi substituída pelo endpoint oficial dedicado de consulta pontual de estoque — ver seção "FASE C.2" abaixo. O modelo de dois estágios ACK→releitura e a distinção VERIFIED/MISMATCH/FAILED descritos nesta seção permanecem válidos; só o endpoint HTTP e o formato de resposta mudaram.
+
+### Modelo de dois estágios em `syncStock()`
+
+```text
+ACK do lote (PUT /produtos/estoques)
+  → rejeitado no ack (produtosNaoAtualizados) => FAILED, zero releitura gasta
+  → aceito no ack (produtosAtualizados)
+      → releitura real via readWakeStockByVariantId()
+          → bate com o valor alvo   => VERIFIED  => 'applied',  lastAppliedWakeStock avança
+          → valor diferente         => MISMATCH  => 'mismatch', lastAppliedWakeStock NÃO avança
+          → releitura lança erro    => FAILED     => 'failed',  lastAppliedWakeStock NÃO avança
+```
+
+`stockUnchanged` (comparação `lastAppliedWakeStock === targetWakeStock`) continua checado **antes** de qualquer escrita/releitura — zero I/O quando não há mudança real (`no_change`). `dryRun: true` nunca chama nem o writer nem `readWakeStockByVariantId` (`planned`, `lastAppliedWakeStock` intocado).
+
+Nota de implementação: no catch da releitura, `err instanceof WakeClientError ? err.message : String(err)` — um erro genérico (`new Error(...)`, não `WakeClientError`) passa por `String(err)`, que prefixa `"Error: "` à mensagem (ex.: `"Error: ECONNRESET"`), diferente de um `WakeClientError`, cujo `.message` é usado puro. Comportamento real do código, não bug — os testes de `engine.test.ts` verificam essa formatação exata.
+
+### Auditoria de performance da Tabela 74 — BLOCKER descartado sem mudança de código
+
+A revisão do PR #3 pediu para confirmar que `fetchPriceTableEntries()` (reconferência da Tabela 74, ver seção FASE C acima) relê a tabela inteira 1× por **lote**, não 1× por **SKU alterado** — o segundo padrão seria O(N) chamadas e um BLOCKER de performance real em runs grandes. Teste com 3 SKUs alterados na mesma run prova `1 + ceil(N/50) = 2` chamadas totais a `getWakePriceTableProducts` (1 para o diff inicial + 1 para a releitura pós-escrita do lote inteiro) — confirma o comportamento já documentado na tabela de rate-limit da FASE C ("1 GET paginado por lote inteiro, não por item"), sem qualquer alteração de código de batching.
+
+### §14 — reconciliador READ-ONLY nunca chama um escritor, confirmado sem código novo
+
+Esta exigência já estava integralmente coberta por `scripts/reconcile/no-write-path.test.ts` (133 testes, pré-existente desde antes da FASE C) — um arquivo de análise estática que lê o código-fonte `.ts` real (não mocks) do reconciliador e do módulo puro `src/lib/units/`, e prova por regex: nenhum verbo HTTP de escrita (`PUT`/`POST`/`PATCH`/`DELETE`) em string literal, `fetch`/`fetchImpl` só chamado dentro de `http.ts`, nenhum import de módulo de domínio da aplicação (cliente Wake, DB, settings, sync) fora da exceção estreita de `src/lib/units` (o próprio motor puro de UNIT, também comprovadamente sem acesso a env/DB/HTTP/filesystem), nenhuma palavra-chave de SQL de escrita/`.run()`/`db.exec()`, SQLite aberto com `readonly: true`+`query_only = ON` e só `SELECT`, nenhuma função de escrita de filesystem fora de `output.ts`. Rodado isoladamente nesta fase: 133/133 passando — auditoria confirmada, zero linha de código nova.
+
+Testes: **441 no total** (425 da FASE C + 16 líquidos novos: 6 cenários de estoque A–F, 1 auditoria de performance da Tabela 74, 1 fail-closed consolidado, 1 dry-run consolidado, 7 de `readWakeStockByVariantId` em `client.test.ts`, líquido do ajuste de idempotência). `tsc --noEmit`, `vitest run` (21 arquivos) e `npm run build` limpos.
+
+## FASE C.2 — Corrigir o readback de estoque para o endpoint oficial dedicado da Wake (`feat/write-guards-readback`, 17/09/2026)
+
+Achado de revisão adicional sobre o Draft PR #3, depois de fechado o BLOCKER da FASE C.1: a semântica "ACK do writer != estado remoto verificado" estava correta, mas `readWakeStockByVariantId()` usava o endpoint de **listagem/catálogo** (`GET /produtos` + cursor exclusivo `produtoVarianteIdDe: variantId - 1`) em vez do endpoint **oficial dedicado** de consulta pontual de estoque que a própria documentação Wake recomenda pra esse caso de uso. Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS/início da FASE D.
+
+### Novo endpoint: `GET /produtos/{identificador}/estoque`
+
+`readWakeStockByVariantId(variantId, cdId)` (assinatura e contrato de retorno `number | null` inalterados — `engine.ts` não precisou de nenhuma mudança) agora chama `GET /produtos/{identificador}/estoque?tipoIdentificador=ProdutoVarianteId`, reaproveitando `wakeRequest()` (mesmo auth/retry/backoff/timeout/circuito de throttle do resto do cliente Wake — nenhum cliente HTTP paralelo). Schema de resposta confirmado ao vivo em 17/09/2026 direto do OAS oficial (`wakecommerce.readme.io`, ver comentário em `src/lib/wake/client.ts` pra URL exata usada):
+
+```json
+{
+  "estoqueFisico": 0,
+  "estoqueReservado": 0,
+  "listProdutoVarianteCentroDistribuicaoEstoque": [
+    { "centroDistribuicaoId": 0, "nome": "string", "estoqueFisico": 0, "estoqueReservado": 0 }
+  ]
+}
+```
+
+404 devolve texto puro (`"Produto não encontrado"`), não JSON — tratado como não-verificável (`null`), sem retry indevido (`wakeRequest()` só retenta 429/5xx/timeout).
+
+### Semântica do CD e do campo comparado
+
+Os campos `estoqueFisico`/`estoqueReservado` de **topo** são o TOTAL agregado entre todos os CDs — nunca usados para validar a escrita de um CD específico. A seleção é estritamente `centroDistribuicaoId === cdId esperado` dentro de `listProdutoVarianteCentroDistribuicaoEstoque[]`; CD ausente da lista, lista ausente/não-array, ou `estoqueFisico` da entrada não-numérico/não-finito → `null` (nunca `0` silencioso, nunca o total agregado como substituto). Campo comparado: `estoqueFisico` da entrada do CD — auditado contra o writer `updateWakeStock()` (`WakeStockUpdateItem.listaEstoque[]`, que também grava `estoqueFisico` por CD): writer e reader usam exatamente o mesmo campo/semântica, sem necessidade de ajuste. `estoqueReservado` continua nunca subtraído nem comparado — a Wake não expõe um único campo "estoque disponível/exposto"; o que o Casa Hub escreve e verifica é sempre `estoqueFisico`.
+
+### Testes (`client.test.ts`)
+
+Suíte antiga de 7 testes (baseada no endpoint de listagem) substituída por 9 testes cobrindo os 8 cenários mínimos A–H exigidos pela correção (F e G cada um com um caso extra de propagação quando o erro persiste além do retry): request/query corretos (A), CD correto com uma ou várias entradas (B/C), CD ausente → `null` (D), 404 sem retry (E), 429 e 5xx respeitando a política de retry existente, com sucesso após retentativa e com propagação quando o erro persiste (F/G), e campo de estoque malformado (lista ausente, entrada sem `estoqueFisico`, tipo não-numérico) → fail-closed em todos os casos (H). `engine.test.ts` não precisou de nenhuma mudança — os cenários A–F da FASE C.1 (VERIFIED/MISMATCH/FAILED, idempotência, dry-run) e o teste de call-count da Tabela 74 continuam passando sem alteração, porque mockam `readWakeStockByVariantId` no nível de export do módulo, desacoplados do endpoint HTTP subjacente.
+
+### Rate limit — sem mudança de estratégia
+
+O endpoint dedicado continua sendo 1 GET por item efetivamente aceito no ACK do lote, **serial** (`for` + `await sleep(WAKE_VERIFY_DELAY_MS)` em `syncStock()`, `src/lib/sync/engine.ts`) — mesmo ritmo documentado na tabela de rate-limit acima, só trocando qual endpoint é chamado. `MAX concurrent stock readbacks = 1`.
+
+Testes: **443 no total** (441 da FASE C.1 + 2 líquidos: suíte de `readWakeStockByVariantId` em `client.test.ts` cresceu de 7 pra 9 cenários, restante do arquivo idêntico). `tsc --noEmit`, `vitest run` (21 arquivos) e `npm run build` limpos.
 
 ## Realtime
 

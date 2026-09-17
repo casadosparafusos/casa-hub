@@ -67,6 +67,26 @@ explicitamente como **NÃO CONFIRMADO**.
 - **`GET /produtos/alteracoes`**: consulta produtos alterados -- usado
   aqui como probe read-only e para reverificar estado real do Wake após
   uma escrita ambígua (timeout, erro de rede no meio da chamada).
+- **`GET /produtos/{identificador}/estoque`**: endpoint oficial DEDICADO de
+  consulta pontual de estoque (total + por centro de distribuição) --
+  query param `tipoIdentificador` (`"Sku"` ou `"ProdutoVarianteId"`,
+  capitalizado, mesma convenção de `/produtos/precos`/`/produtos/estoques`
+  acima). Schema de resposta confirmado ao vivo em 17/09/2026 direto do OAS
+  oficial (`wakecommerce.readme.io`):
+  `{estoqueFisico, estoqueReservado, listProdutoVarianteCentroDistribuicaoEstoque:
+  [{centroDistribuicaoId, nome, estoqueFisico, estoqueReservado}]}`. Os
+  campos `estoqueFisico`/`estoqueReservado` de TOPO são o total agregado
+  entre todos os CDs -- nunca usar pra validar a escrita de um CD
+  específico, só a entrada correspondente dentro de
+  `listProdutoVarianteCentroDistribuicaoEstoque[]`. 404 devolve texto puro
+  (`"Produto não encontrado"`), não JSON. É este o endpoint usado por
+  `readWakeStockByVariantId()` (`src/lib/wake/client.ts`) para o
+  read-after-write de estoque pós-escrita (FASE C.2, corrigindo o uso
+  anterior e equivocado do endpoint de listagem `GET /produtos` com cursor
+  na FASE C.1) -- não confundir com o reconciliador READ-ONLY em bulk
+  (`scripts/reconcile/`), que legitimamente usa `GET /produtos` +
+  `camposAdicionais=Estoque` para varrer o catálogo inteiro de uma vez, um
+  caso de uso diferente de verificação pontual pós-escrita.
 - **Rate limit**: **120 requisições/minuto por grupo de endpoint**.
   Resposta de throttle carrega header `Retry-After`. **5 respostas de
   throttle seguidas bloqueiam o token por 1 hora.** Por isso
