@@ -1,6 +1,6 @@
 # STATUS — Casa Hub
 
-Atualizado em 17/09/2026 (FASE C: guards de produção + read-after-write + estados de aplicação em `feat/write-guards-readback`, sobre `main` já com FASE B/B.1–B.4 mergeadas — Draft PR pendente de abertura — não mergeado, não deployado, nenhuma migration aplicada em produção).
+Atualizado em 17/09/2026 (FASE C.1: hardening final do read-after-write de estoque + auditoria de performance da Tabela 74, antes do merge do PR #3, em `feat/write-guards-readback` — não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS).
 
 ## Produção
 
@@ -15,7 +15,7 @@ Atualizado em 17/09/2026 (FASE C: guards de produção + read-after-write + esta
 | `audit/reconciliacao-readonly` | main | Reconciliador READ-ONLY. Executado 1× em produção em 11/09/2026 (SHA `c7616d7`). Consolidada em `main` via FASE A/A.1. |
 | `audit/ciss-unit-census` | audit/reconciliacao-readonly | Censo READ-ONLY de todas as UNITs do CISS + decisões OWNER_CONFIRMED em 11/09/2026. Consolidada em `main` via FASE A/A.1. |
 | `feat/unit-strategies` | `main` (`4ebedec`) | FASE B + B.1–B.4, motor `UnitResolver → UnitStrategy → CommercialPolicy`. **Mergeada em `main` via PR #2 (`c13e7f8`).** |
-| `feat/write-guards-readback` | `main` (`c13e7f8`) | **Branch atual (FASE C).** Ver seção dedicada abaixo. |
+| `feat/write-guards-readback` | `main` (`c13e7f8`) | **Branch atual (FASE C + FASE C.1).** Ver seções dedicadas abaixo. Draft PR #3 aberto, em hardening final antes de review/merge. |
 
 ## Censo de UNITs do CISS + mapa canônico OWNER_CONFIRMED — `audit/ciss-unit-census`
 
@@ -162,6 +162,22 @@ Converte o motor canônico por UNIT (FASE B/B.1–B.4, já em `main`) num caminh
 - `syncRunItems.status` ganhou o valor `'mismatch'` no enum TypeScript (`src/lib/db/schema.ts`) — sem CHECK no SQL nesse campo (igual todo o resto do enum), então **sem migration nova**.
 - Nenhuma remediação real: os 16 produtos PC mal-rotulados, o produto KG ao vivo e a promoção 10365 continuam **fora de escopo** desta fase (ver `ARCHITECTURE_TARGET.md`, pendência renomeada pra FASE D).
 - Testes: **425 no total** (401 pré-existentes da FASE B.4 + 16 novos: 8 em `engine.test.ts` cobrindo os 4 itens acima + 7 em `ciss/client.test.ts` + 9 em `wake/client.test.ts` — total líquido 24). `tsc --noEmit` e `vitest run` (21 arquivos) limpos.
+
+## FASE C.1 — Hardening final do read-after-write, antes do merge do PR #3 — `feat/write-guards-readback` (17/09/2026)
+
+A revisão de código do Draft PR #3 (FASE C) encontrou um BLOCKER e pediu uma auditoria de performance, ambos fechados nesta rodada, mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS/início da FASE D.
+
+- **BLOQUEIO PRINCIPAL corrigido — estoque agora tem read-after-write real**: antes, a reconferência de estoque confirmava só pelo ACK do próprio `PUT /produtos/estoques` ("binário via ACK" — texto da FASE C, já desatualizado por esta seção), o que a revisão apontou como não satisfazendo a regra canônica "writer 2xx/ACK != estado remoto verificado". Novo adaptador `readWakeStockByVariantId(variantId, cdId)` (`src/lib/wake/client.ts`) usa o endpoint de listagem `GET /produtos` com cursor exclusivo (`produtoVarianteIdDe: variantId-1`, `quantidadeRegistros: 1`), valida que o `produtoVarianteId` devolvido bate exatamente com o pedido (nunca aceita item de um gap de ID), devolve `number | null` (erro de rede/protocolo propaga em vez de virar `null` silencioso).
+- **Modelo de dois estágios**: ACK do lote (rejeição imediata → `'failed'`, sem gastar releitura) → para itens aceitos no ACK, releitura real → compara com o valor alvo → bate = `VERIFIED` (`'applied'`, `lastAppliedWakeStock` avança); não bate = `MISMATCH` (`'mismatch'`, `lastAppliedWakeStock` **não** avança); releitura lança erro = `FAILED` (`'failed'`, `lastAppliedWakeStock` não avança). Estoque ganha a mesma distinção `MISMATCH`/`FAILED` que preço e Tabela 74 já tinham desde a FASE C — a nota da FASE C de que estoque "permanece applied/failed, sem valor diferente possível nesse contrato" está **superada** por esta seção.
+- **6 cenários obrigatórios** (`src/lib/sync/engine.test.ts`): A) ack aceito + releitura confirma → `applied`, avança; B) ack aceito + releitura diverge → `mismatch`, não avança; C) Wake recusa no ack → `failed`, zero releitura gasta; D) ack aceito + releitura lança erro de rede (`Error` genérico, não `WakeClientError`) → `failed` (nunca `mismatch`) — nota: esse tipo de erro passa por `String(err)` no catch, que prefixa `"Error: "` à mensagem, diferente de um `WakeClientError` (`err.message` puro); E) estoque já igual ao último aplicado → `no_change`, zero chamada a escritor ou releitura (checado antes de qualquer I/O); F) dry-run com estoque divergente → `planned`, zero escritor/releitura real, `lastAppliedWakeStock` intocado.
+- **Auditoria de performance da Tabela 74 — BLOCKER descartado**: confirmado que `fetchPriceTableEntries()` relê a tabela inteira 1× por lote (não 1× por SKU alterado). Teste novo com 3 SKUs alterados na mesma run prova exatamente `1 + ceil(N/50) = 2` chamadas totais a `getWakePriceTableProducts` (1 diff inicial + 1 releitura pós-escrita do lote inteiro) — nunca `N` chamadas. Nenhuma mudança de código de batching; só prova por teste.
+- **Teste fail-closed consolidado**: `UNSUPPORTED_UNIT` + `CONFIGURATION_REQUIRED` (KG sem config) + `NO_STOCK_RECORD` misturados numa única run — nenhum aciona qualquer um dos 4 writers Wake. Nota de escopo: não existe um código de validação distinto de "preço inválido"/"estoque inválido" no motor (confirmado por busca no código-fonte) — o teste foi desenhado em torno dos motivos de recusa que realmente existem (resolução de UNIT), sem inventar caminho de validação novo.
+- **Teste dry-run consolidado**: produto `CT+FIXADOR_CENTO` com preço, estoque e Tabela 74 todos divergentes do estado anterior — `dryRun:true` numa única run prova zero chamada aos 4 writers Wake e `lastApplied*` (unitário/especial/estoque) inteiramente intocado.
+- **Idempotência estendida**: o teste ponta a ponta já existente (`runSync()` duas vezes seguidas) ganhou a asserção de que `readWakeStockByVariantId` também não é chamado na segunda run — cobre o novo readback real junto dos outros 3 writers já verificados desde a FASE C.
+- **§14 (reconciliador nunca chama escritor) confirmado sem código novo**: `scripts/reconcile/no-write-path.test.ts` (133 testes, pré-existente desde antes da FASE C) já prova por análise estática do código-fonte — regex sobre os arquivos `.ts` reais, não só mock — que o reconciliador READ-ONLY e o módulo puro `src/lib/units/` nunca chamam nenhum escritor: nenhum verbo HTTP de escrita, `fetch` só dentro de `http.ts`, nenhum import de módulo de app fora do escopo permitido, nenhum SQL de escrita, SQLite aberto `readonly`+`query_only`, nenhuma escrita de filesystem fora de `output.ts`. Rodado isoladamente nesta fase: 133/133 passando.
+- **Fix de typecheck em `client.test.ts`** (bug pré-existente da própria FASE C, nunca compilado até esta rodada): `vi.mocked(fetch).mock.calls[0][0]` disparava `TS2532` — corrigido com asserção não-nula (`mock.calls[0]![0]`).
+- Testes: **441 no total** (425 da FASE C + 16 líquidos novos: 6 cenários de estoque + 1 auditoria de performance da Tabela 74 + 1 fail-closed consolidado + 1 dry-run consolidado + 7 de `readWakeStockByVariantId` em `client.test.ts`, líquido do ajuste de idempotência). `tsc --noEmit`, `vitest run` (21 arquivos) e `npm run build` limpos. Secrets scan no diff limpo (só mock pré-existente `'fake-token'`).
+- **Não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, FASE D não iniciada.**
 
 ## Pendências conhecidas (aguardando aprovação)
 

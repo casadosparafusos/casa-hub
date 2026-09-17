@@ -157,7 +157,7 @@ Antes da FASE C, qualquer reconferência que não confirmasse o valor enviado vi
 - `'failed'`: a própria chamada de escrita deu erro, OU a releitura não encontrou o item / falhou por conta própria (rede, timeout);
 - em ambos os casos `lastApplied*` (`sync_product_state`) **não avança** — a próxima run detecta o item como "mudou" de novo e tenta reenviar, em vez de travar num falso "já aplicado".
 
-Aplicado em dois pontos de `syncPrices()` (`src/lib/sync/engine.ts`): a reconferência de preço unitário (`getWakeProductBySku`) e a reconferência da Tabela de Preço 74 (`fetchPriceTableEntries`, ver abaixo). **Não** aplicado ao estoque: a reconferência de estoque usa o ACK do próprio `PUT /produtos/estoques` (`produtosAtualizados`/`produtosNaoAtualizados`), que é um aceite/rejeição binário por variante — não existe um "valor diferente" intermediário nesse contrato, então estoque continua só `'applied'`/`'failed'`.
+Aplicado em três pontos de `syncPrices()`/`syncStock()` (`src/lib/sync/engine.ts`): a reconferência de preço unitário (`getWakeProductBySku`), a reconferência da Tabela de Preço 74 (`fetchPriceTableEntries`, ver abaixo) e, desde a FASE C.1, a reconferência de estoque (`readWakeStockByVariantId`, ver seção "FASE C.1" abaixo). **Nota histórica**: até a FASE C, estoque usava só o ACK do próprio `PUT /produtos/estoques` (`produtosAtualizados`/`produtosNaoAtualizados`) e permanecia `'applied'`/`'failed'` sem estado `'mismatch'`, por não existir releitura real — isso mudou na FASE C.1.
 
 ### Read-after-write da Tabela de Preço 74
 
@@ -179,11 +179,45 @@ Nenhuma mudança de estratégia de lote nesta fase — a FASE C só adicionou le
 |---|---|---|---|
 | Preço unitário | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/precos` | 1 `GET /produtos/{sku}` por item do lote, **serial** (nunca em paralelo) | `sleep(WAKE_VERIFY_DELAY_MS = 650ms)` após cada item — mantém lote+reconferência combinados bem abaixo dos 120 req/min documentados da Wake |
 | Tabela de Preço 74 | `WAKE_BATCH_SIZE = 50` por `PUT`/`POST /tabelaPrecos/{id}/produtos` | 1 `GET /tabelaPrecos/{id}/produtos` paginado por **lote inteiro** (não por item) via `fetchPriceTableEntries()` — mesma função usada pro diff inicial | sem sleep extra por item; o custo por lote já é 1 chamada, não N |
-| Estoque | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/estoques` | nenhuma chamada extra — reconfere pelo **ACK do próprio PUT** (`produtosAtualizados`/`produtosNaoAtualizados`) | `sleep(WAKE_VERIFY_DELAY_MS)` uma vez por lote (não por item, já que não há GET extra) |
+| Estoque | `WAKE_BATCH_SIZE = 50` por `PUT /produtos/estoques` | ACK do próprio PUT decide `'failed'` imediato (rejeitado no lote); para os aceitos, 1 `GET /produtos` (cursor exclusivo) por item via `readWakeStockByVariantId()`, **serial** — ver "FASE C.1" abaixo | `sleep(WAKE_VERIFY_DELAY_MS = 650ms)` após cada releitura de item aceito, mesmo ritmo do preço unitário |
 | Cliente CISS (`src/lib/ciss/client.ts`) | — (só leitura) | — | `MAX_RETRIES = 3`, backoff exponencial `min(1000·2^(tentativa-1), 8000)` ms; retry em 429/5xx/timeout; erro permanente (4xx≠429) nunca repete |
 | Cliente Wake (`src/lib/wake/client.ts`) | — | — | `MAX_RETRIES = 2` (deliberadamente mais conservador que o CISS — ver comentário no topo do arquivo); 429 respeita `Retry-After` do header (default 5s se ausente); 5xx usa backoff fixo `3000ms·tentativa`; **circuito abre** após 5 respostas 429 consecutivas na mesma execução (`consecutiveThrottles`, estado de módulo) e recusa novas chamadas com `WakePermanentError` sem nem tentar a rede — proteção contra o lockout de 1h documentado do token Wake em throttle persistente |
 
 Cobertura de teste do retry/backoff (antes zero, só indireta via mocks de `engine.test.ts`): `src/lib/ciss/client.test.ts` (7 testes) e `src/lib/wake/client.test.ts` (9 testes), incluindo o circuito de throttle da Wake.
+
+## FASE C.1 — Hardening final do read-after-write de estoque, antes do merge do PR #3 (`feat/write-guards-readback`, 17/09/2026)
+
+Fecha o BLOCKER encontrado na revisão de código do Draft PR #3: a reconferência de estoque, único caminho de escrita que ainda dependia só do ACK do writer, sem satisfazer a regra canônica da FASE C ("writer 2xx/ACK != estado remoto verificado"). Mesma branch, sem merge/deploy/migration em produção/escrita real em Wake/CISS/início da FASE D.
+
+### `readWakeStockByVariantId` — novo adaptador READ-ONLY de estoque por variante
+
+`src/lib/wake/client.ts` não tinha, até esta fase, nenhuma forma de reler o estoque de uma variante específica pós-escrita (`getWakeProductBySku` cobre preço, não estoque). `readWakeStockByVariantId(variantId, cdId)` reaproveita o endpoint de listagem/catálogo `GET /produtos` (não o de item único) com um truque de cursor exclusivo-ascendente: `produtoVarianteIdDe: variantId - 1`, `quantidadeRegistros: 1`, `camposAdicionais=Estoque`, `centrosDistribuicao={cdId}`. Valida estritamente que o `produtoVarianteId` do item devolvido bate com o pedido — nunca aceita silenciosamente um produto de um gap de ID adjacente — e devolve `number | null` (`null` = não verificável: resposta vazia, campo `estoque[]` ausente, sem entrada pro CD pedido, ou `estoqueFisico` não-numérico). Erro de rede/protocolo (`WakeTransientError`/`WakePermanentError`, ou qualquer exceção não tratada) propaga em vez de virar `null` — o chamador trata isso como `FAILED`, nunca como `MISMATCH` silencioso.
+
+### Modelo de dois estágios em `syncStock()`
+
+```text
+ACK do lote (PUT /produtos/estoques)
+  → rejeitado no ack (produtosNaoAtualizados) => FAILED, zero releitura gasta
+  → aceito no ack (produtosAtualizados)
+      → releitura real via readWakeStockByVariantId()
+          → bate com o valor alvo   => VERIFIED  => 'applied',  lastAppliedWakeStock avança
+          → valor diferente         => MISMATCH  => 'mismatch', lastAppliedWakeStock NÃO avança
+          → releitura lança erro    => FAILED     => 'failed',  lastAppliedWakeStock NÃO avança
+```
+
+`stockUnchanged` (comparação `lastAppliedWakeStock === targetWakeStock`) continua checado **antes** de qualquer escrita/releitura — zero I/O quando não há mudança real (`no_change`). `dryRun: true` nunca chama nem o writer nem `readWakeStockByVariantId` (`planned`, `lastAppliedWakeStock` intocado).
+
+Nota de implementação: no catch da releitura, `err instanceof WakeClientError ? err.message : String(err)` — um erro genérico (`new Error(...)`, não `WakeClientError`) passa por `String(err)`, que prefixa `"Error: "` à mensagem (ex.: `"Error: ECONNRESET"`), diferente de um `WakeClientError`, cujo `.message` é usado puro. Comportamento real do código, não bug — os testes de `engine.test.ts` verificam essa formatação exata.
+
+### Auditoria de performance da Tabela 74 — BLOCKER descartado sem mudança de código
+
+A revisão do PR #3 pediu para confirmar que `fetchPriceTableEntries()` (reconferência da Tabela 74, ver seção FASE C acima) relê a tabela inteira 1× por **lote**, não 1× por **SKU alterado** — o segundo padrão seria O(N) chamadas e um BLOCKER de performance real em runs grandes. Teste com 3 SKUs alterados na mesma run prova `1 + ceil(N/50) = 2` chamadas totais a `getWakePriceTableProducts` (1 para o diff inicial + 1 para a releitura pós-escrita do lote inteiro) — confirma o comportamento já documentado na tabela de rate-limit da FASE C ("1 GET paginado por lote inteiro, não por item"), sem qualquer alteração de código de batching.
+
+### §14 — reconciliador READ-ONLY nunca chama um escritor, confirmado sem código novo
+
+Esta exigência já estava integralmente coberta por `scripts/reconcile/no-write-path.test.ts` (133 testes, pré-existente desde antes da FASE C) — um arquivo de análise estática que lê o código-fonte `.ts` real (não mocks) do reconciliador e do módulo puro `src/lib/units/`, e prova por regex: nenhum verbo HTTP de escrita (`PUT`/`POST`/`PATCH`/`DELETE`) em string literal, `fetch`/`fetchImpl` só chamado dentro de `http.ts`, nenhum import de módulo de domínio da aplicação (cliente Wake, DB, settings, sync) fora da exceção estreita de `src/lib/units` (o próprio motor puro de UNIT, também comprovadamente sem acesso a env/DB/HTTP/filesystem), nenhuma palavra-chave de SQL de escrita/`.run()`/`db.exec()`, SQLite aberto com `readonly: true`+`query_only = ON` e só `SELECT`, nenhuma função de escrita de filesystem fora de `output.ts`. Rodado isoladamente nesta fase: 133/133 passando — auditoria confirmada, zero linha de código nova.
+
+Testes: **441 no total** (425 da FASE C + 16 líquidos novos: 6 cenários de estoque A–F, 1 auditoria de performance da Tabela 74, 1 fail-closed consolidado, 1 dry-run consolidado, 7 de `readWakeStockByVariantId` em `client.test.ts`, líquido do ajuste de idempotência). `tsc --noEmit`, `vitest run` (21 arquivos) e `npm run build` limpos.
 
 ## Realtime
 
