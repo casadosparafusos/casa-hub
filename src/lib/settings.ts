@@ -61,6 +61,72 @@ export const STOCK_SOURCE_DEFAULTS = {
   CISS_STOCK_LOCATION: 5,
 } as const
 
+// FASE D-PRE §4 (achado independente do Tech Lead): PUT /api/settings so
+// validava chave-conhecida + string nao-vazia, e getNumberRule()/
+// getStockSourceValue() abaixo tratavam QUALQUER valor persistido invalido
+// (NaN, negativo, fora de faixa) exatamente igual a um valor AUSENTE --
+// caindo no default e deixando a sync real rodar com uma configuracao que
+// ninguem confirmou de verdade (ex: STOCK_PERCENT="abc" virava 10% default
+// em silencio). Esse validador fica no meio do caminho: AUSENTE ainda cai
+// no default (comportamento antigo, preservado), mas PRESENTE-E-INVALIDO
+// agora e um erro explicito, nunca mais um fallback silencioso. Reusado por
+// PUT /api/settings (route.ts), pelos getters abaixo e pelos 3
+// REQUIRED_UNCONFIRMED_KEYS numericos (WAKE_CD_ID/WAKE_PRICE_TABLE_ID/
+// WAKE_PROMOTION_ID, ver checkRequiredUnconfirmed logo abaixo e
+// src/lib/sync/engine.ts).
+export class SettingValidationError extends Error {
+  constructor(
+    public readonly key: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'SettingValidationError'
+  }
+}
+
+type SettingSpec = { kind: 'number' | 'integer'; min?: number; max?: number; exclusiveMin?: number }
+
+export const SETTING_RANGES: Record<string, SettingSpec> = {
+  UNIT_PRICE_MARKUP_PERCENT: { kind: 'number', min: 0 },
+  WHOLESALE_DISCOUNT_PERCENT: { kind: 'number', min: 0, max: 100 },
+  STOCK_PERCENT: { kind: 'number', min: 0, max: 100 },
+  WHOLESALE_MIN_QTY: { kind: 'integer', exclusiveMin: 0 },
+  RECONCILIATION_HOUR_LOCAL: { kind: 'integer', min: 0, max: 23 },
+  STOCK_SYNC_INTERVAL_MINUTES: { kind: 'number', exclusiveMin: 0 },
+  PRICE_SYNC_INTERVAL_HOURS: { kind: 'number', exclusiveMin: 0 },
+  CISS_STOCK_ENTERPRISE: { kind: 'integer', exclusiveMin: 0 },
+  CISS_STOCK_LOCATION: { kind: 'integer', exclusiveMin: 0 },
+  WAKE_CD_ID: { kind: 'integer', exclusiveMin: 0 },
+  WAKE_PRICE_TABLE_ID: { kind: 'integer', exclusiveMin: 0 },
+  WAKE_PROMOTION_ID: { kind: 'integer', exclusiveMin: 0 },
+}
+
+/** Lanca SettingValidationError se `raw` (valor JA CONFIRMADO presente) nao respeitar a faixa de `key`. */
+export function validateSettingValue(key: string, raw: string): number {
+  const spec = SETTING_RANGES[key]
+  if (!spec) throw new SettingValidationError(key, `Chave '${key}' nao tem faixa de validação definida`)
+  const n = Number(raw)
+  if (!Number.isFinite(n)) throw new SettingValidationError(key, `'${key}' precisa ser um número válido, recebido: ${JSON.stringify(raw)}`)
+  if (spec.kind === 'integer' && !Number.isInteger(n)) {
+    throw new SettingValidationError(key, `'${key}' precisa ser um número inteiro, recebido: ${raw}`)
+  }
+  if (spec.min !== undefined && n < spec.min) throw new SettingValidationError(key, `'${key}' precisa ser >= ${spec.min}, recebido: ${n}`)
+  if (spec.max !== undefined && n > spec.max) throw new SettingValidationError(key, `'${key}' precisa ser <= ${spec.max}, recebido: ${n}`)
+  if (spec.exclusiveMin !== undefined && n <= spec.exclusiveMin) {
+    throw new SettingValidationError(key, `'${key}' precisa ser > ${spec.exclusiveMin}, recebido: ${n}`)
+  }
+  return n
+}
+
+export function isValidSettingValue(key: string, raw: string): boolean {
+  try {
+    validateSettingValue(key, raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function envOverride(key: string): string | undefined {
   const v = process.env[key]
   return v && v.trim() !== '' ? v.trim() : undefined
@@ -123,7 +189,7 @@ export async function isSecretConfigured(key: SecretKey): Promise<boolean> {
   return envOverride(key) !== undefined
 }
 
-/** Le todos os valores obrigatorios-nao-confirmados e diz quais faltam. */
+/** Le todos os valores obrigatorios-nao-confirmados e diz quais faltam (ou estao presentes mas invalidos). */
 export async function checkRequiredUnconfirmed(): Promise<{
   values: Record<RequiredUnconfirmedKey, string | null>
   missing: RequiredUnconfirmedKey[]
@@ -133,7 +199,16 @@ export async function checkRequiredUnconfirmed(): Promise<{
   for (const key of REQUIRED_UNCONFIRMED_KEYS) {
     const v = await getSetting(key)
     values[key] = v
-    if (v === null) missing.push(key)
+    if (v === null) {
+      missing.push(key)
+    } else if (key in SETTING_RANGES && !isValidSettingValue(key, v)) {
+      // FASE D-PRE §4: presente-mas-invalido (WAKE_CD_ID/WAKE_PRICE_TABLE_ID/
+      // WAKE_PROMOTION_ID sao os 3 numericos desta lista) bloqueia a sync
+      // real do mesmo jeito que ausente -- reaproveita `missing`, ja usado
+      // pelo gate em src/lib/sync/engine.ts (runSyncLocked), em vez de criar
+      // um segundo gate paralelo que alguem podia esquecer de checar.
+      missing.push(key)
+    }
   }
   return { values, missing }
 }
@@ -141,15 +216,13 @@ export async function checkRequiredUnconfirmed(): Promise<{
 async function getNumberRule(key: keyof typeof RULE_DEFAULTS): Promise<number> {
   const raw = await getSetting(key)
   if (raw === null) return RULE_DEFAULTS[key]
-  const n = Number(raw)
-  return Number.isFinite(n) ? n : RULE_DEFAULTS[key]
+  return validateSettingValue(key, raw)
 }
 
 async function getStockSourceValue(key: keyof typeof STOCK_SOURCE_DEFAULTS): Promise<number> {
   const raw = await getSetting(key)
   if (raw === null) return STOCK_SOURCE_DEFAULTS[key]
-  const n = Number(raw)
-  return Number.isFinite(n) ? n : STOCK_SOURCE_DEFAULTS[key]
+  return validateSettingValue(key, raw)
 }
 
 export const rules = {

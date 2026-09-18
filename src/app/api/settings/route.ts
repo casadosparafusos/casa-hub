@@ -4,12 +4,15 @@ import {
   REQUIRED_UNCONFIRMED_KEYS,
   RULE_DEFAULTS,
   SECRET_KEYS,
+  SETTING_RANGES,
+  SettingValidationError,
   STOCK_SOURCE_DEFAULTS,
   checkRequiredUnconfirmed,
   getSetting,
   isSecretConfigured,
   setSecret,
   setSetting,
+  validateSettingValue,
 } from '@/lib/settings'
 import { requireSessionIdentity } from '@/lib/auth'
 
@@ -25,6 +28,14 @@ const ALL_KEYS = [...REQUIRED_UNCONFIRMED_KEYS, ...RULE_KEYS, ...STOCK_SOURCE_KE
 const SECRET_KEYS_LIST: readonly string[] = SECRET_KEYS
 
 export async function GET() {
+  // FASE D-PRE §5 (achado independente do Tech Lead): PUT ja exigia sessao,
+  // mas GET nao checava nada -- qualquer requisicao nao autenticada lia
+  // config/IDs Wake e quais segredos estao configurados (booleano, nunca o
+  // valor). Mesmo sem vazar segredo em si, isso vaza superficie de ataque
+  // de graça pra quem nao tem sessao nenhuma.
+  const identity = await requireSessionIdentity()
+  if ('error' in identity) return NextResponse.json({ error: 'Não autenticado' }, { status: 401 })
+
   const { values, missing } = await checkRequiredUnconfirmed()
   const rules: Record<string, string | null> = {}
   for (const key of RULE_KEYS) rules[key] = await getSetting(key)
@@ -48,6 +59,22 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, { status: 400 })
   }
   const { key, value } = parsed.data
+
+  // FASE D-PRE §4 (achado independente do Tech Lead): antes, qualquer string
+  // nao-vazia passava (ex: STOCK_PERCENT="abc" ou WHOLESALE_DISCOUNT_PERCENT
+  // ="200" eram aceitos e persistidos), e o fail-open ficava so do lado da
+  // leitura (getNumberRule caindo no default em silencio). Agora a faixa
+  // exata de cada chave numerica (ver SETTING_RANGES) e validada tambem na
+  // escrita -- 400 antes de persistir, nunca um valor fora de faixa gravado.
+  if (key in SETTING_RANGES) {
+    try {
+      validateSettingValue(key, value)
+    } catch (err) {
+      const message = err instanceof SettingValidationError ? err.message : String(err)
+      return NextResponse.json({ error: message }, { status: 400 })
+    }
+  }
+
   if (SECRET_KEYS_LIST.includes(key)) {
     await setSecret(key as (typeof SECRET_KEYS)[number], value, identity.username)
   } else {
