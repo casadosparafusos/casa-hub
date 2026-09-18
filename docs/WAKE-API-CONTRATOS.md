@@ -134,6 +134,13 @@ explicitamente como **NÃO CONFIRMADO**.
   /produtos/estoques` com o valor calculado), não trata baixa por evento
   de pedido; se o modo confirmado for OFF, isso precisa virar um novo
   fluxo antes do go-live.
+  Revisão Tech Lead PR #4 (fix #3): como não existe endpoint de leitura pra
+  confirmar o modo automaticamente, o servidor agora valida a ESCRITA --
+  `WAKE_STOCK_CONTROL_MODE` só aceita exatamente `fstore` ou `erp`
+  (case-insensitive na entrada, canonicalizado em minúsculo antes de
+  persistir; qualquer outro valor recebe `400` no `PUT /api/settings` e não
+  é gravado). Ver `SETTING_ENUM_RANGES`/`validateEnumSettingValue` em
+  `src/lib/settings.ts`.
 
 ## Bloqueio ativo no token CISS dedicado (04/09/2026)
 
