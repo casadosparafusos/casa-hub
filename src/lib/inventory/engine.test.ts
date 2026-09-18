@@ -37,7 +37,7 @@ describe('calculateUnitStock', () => {
   // configurada por produto (product_sale_unit_config), floor, sobra so pra
   // auditoria.
   it('KG: com config cadastrada, divide estoque em kg pela quantidade por unidade de venda', () => {
-    const result = calculateUnitStock({ unitRaw: 'KG', cissStock: 17, packageConfig: { quantityPerSaleUnit: 5 } })
+    const result = calculateUnitStock({ unitRaw: 'KG', cissStock: 17, packageConfig: { sourceUnit: 'KG', quantityPerSaleUnit: 5 } })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.unitClass).toBe('PACKAGE_MEASURED')

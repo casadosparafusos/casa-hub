@@ -32,7 +32,7 @@ describe('calculateUnitPrice', () => {
   // KG/MT (PACKAGE_MEASURED) -- preco por unidade de origem * quantidade
   // configurada por produto (product_sale_unit_config).
   it('KG: com config cadastrada, multiplica preco por kg pela quantidade por unidade de venda', () => {
-    const result = calculateUnitPrice({ unitRaw: 'KG', cissPrice: 10, packageConfig: { quantityPerSaleUnit: 5 } })
+    const result = calculateUnitPrice({ unitRaw: 'KG', cissPrice: 10, packageConfig: { sourceUnit: 'KG', quantityPerSaleUnit: 5 } })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.unitClass).toBe('PACKAGE_MEASURED')

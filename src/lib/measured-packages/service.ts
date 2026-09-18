@@ -53,6 +53,14 @@ export async function listConfigs(): Promise<ConfigWithProduct[]> {
   return rows.map((r) => toConfigWithProduct(r.config, r.product))
 }
 
+/**
+ * "Pendentes de configuracao": produtos KG/MT ativos que NUNCA tiveram
+ * nenhuma config (nem ativa, nem inativa). Tech Lead review PR #5, achado
+ * #5: o join so filtrava config ATIVA, entao um produto com config so
+ * inativa (existing.active=false, sem outra ativa) caia aqui como
+ * "Configurar" -- deveria aparecer so como "Inativos" (ver listConfigs), com
+ * o fluxo correto sendo Reativar, nunca criar uma config nova por cima.
+ */
 export async function listPendingProducts(): Promise<PendingProduct[]> {
   const rows = await db
     .select({
@@ -64,10 +72,7 @@ export async function listPendingProducts(): Promise<PendingProduct[]> {
     })
     .from(schema.managedProducts)
     .innerJoin(schema.syncProductState, eq(schema.syncProductState.managedProductId, schema.managedProducts.id))
-    .leftJoin(
-      schema.productSaleUnitConfig,
-      and(eq(schema.productSaleUnitConfig.managedProductId, schema.managedProducts.id), eq(schema.productSaleUnitConfig.active, true)),
-    )
+    .leftJoin(schema.productSaleUnitConfig, eq(schema.productSaleUnitConfig.managedProductId, schema.managedProducts.id))
     .where(
       and(
         eq(schema.managedProducts.active, true),
@@ -148,6 +153,21 @@ export async function upsertBySku(input: { sku: string; quantity: number; actor:
     .where(and(eq(schema.productSaleUnitConfig.managedProductId, product.id), eq(schema.productSaleUnitConfig.active, true)))
     .limit(1)
 
+  // Tech Lead review PR #5, achado #5: sem config ativa mas com uma
+  // inativa, o POST manual nao pode criar uma segunda linha ativa por
+  // cima -- o fluxo correto e reativar a existente (reactivateConfig),
+  // que revalida produto/CISS antes de reativar.
+  if (!existing) {
+    const [inactive] = await db
+      .select()
+      .from(schema.productSaleUnitConfig)
+      .where(and(eq(schema.productSaleUnitConfig.managedProductId, product.id), eq(schema.productSaleUnitConfig.active, false)))
+      .limit(1)
+    if (inactive) {
+      throw new MeasuredPackageError(`Existe uma configuração inativa para este SKU. Reative-a antes de editar.`)
+    }
+  }
+
   if (existing && existing.sourceUnit === unitNormalized && existing.quantityPerSaleUnit === input.quantity) {
     return toConfigWithProduct(existing, product)
   }
@@ -223,6 +243,14 @@ export async function deactivateConfig(configId: number, actor: string): Promise
   })
 }
 
+/**
+ * Reativa uma config desativada (FASE E §5). Tech Lead review PR #5, achado
+ * #2 (P1): reativar so pela existencia da linha e inseguro -- o produto pode
+ * ter sido desativado, ou o CISS pode ter mudado de UNIT desde a
+ * desativacao (ex.: KG->MT), o que tornaria quantityPerSaleUnit sem
+ * sentido. Toda revalidacao roda ANTES da transacao -- qualquer bloqueio
+ * significa zero escrita no banco e zero evento REACTIVATE.
+ */
 export async function reactivateConfig(configId: number, actor: string): Promise<ConfigWithProduct> {
   const [existing] = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.id, configId)).limit(1)
   if (!existing) throw new MeasuredPackageError('Configuração não encontrada.')
@@ -230,6 +258,7 @@ export async function reactivateConfig(configId: number, actor: string): Promise
 
   const [product] = await db.select().from(schema.managedProducts).where(eq(schema.managedProducts.id, existing.managedProductId)).limit(1)
   if (!product) throw new MeasuredPackageError('Produto administrado não encontrado.')
+  if (!product.active) throw new MeasuredPackageError(`SKU "${product.wakeSku}" está inativo na whitelist -- ative o produto antes de reativar a configuração.`)
 
   const [otherActive] = await db
     .select()
@@ -237,6 +266,19 @@ export async function reactivateConfig(configId: number, actor: string): Promise
     .where(and(eq(schema.productSaleUnitConfig.managedProductId, existing.managedProductId), eq(schema.productSaleUnitConfig.active, true)))
     .limit(1)
   if (otherActive) throw new MeasuredPackageError('Já existe uma configuração ativa para este produto -- desative-a antes de reativar esta.')
+
+  const unitNormalized = await resolveCissUnit(product.cissProductId)
+  if (!unitNormalized) throw new MeasuredPackageError(`CISS não retornou UNIT para o SKU "${product.wakeSku}". Nenhuma configuração foi reativada.`)
+  if (unitNormalized !== 'KG' && unitNormalized !== 'MT') {
+    throw new MeasuredPackageError(
+      `O SKU "${product.wakeSku}" está cadastrado como ${unitNormalized} no CISS. Esta funcionalidade aceita somente produtos com UNIT KG ou MT. Nenhuma configuração foi reativada.`,
+    )
+  }
+  if (unitNormalized !== existing.sourceUnit) {
+    throw new MeasuredPackageError(
+      `Configuração cadastrada para UNIT ${existing.sourceUnit} incompatível com UNIT atual do CISS ${unitNormalized}. Nenhuma configuração foi reativada.`,
+    )
+  }
 
   return db.transaction((tx) => {
     const reactivated = tx

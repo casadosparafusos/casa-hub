@@ -50,16 +50,19 @@ export async function validateImportRows(rows: RawImportRow[]): Promise<ImportVa
   const stockByCissId = new Map(stockRows.map((s) => [s.productId, s]))
 
   const managedIds = managedRows.map((m) => m.id)
-  const existingConfigs = managedIds.length
-    ? await db
-        .select()
-        .from(schema.productSaleUnitConfig)
-        .where(and(inArray(schema.productSaleUnitConfig.managedProductId, managedIds), eq(schema.productSaleUnitConfig.active, true)))
+  const allConfigs = managedIds.length
+    ? await db.select().from(schema.productSaleUnitConfig).where(inArray(schema.productSaleUnitConfig.managedProductId, managedIds))
     : []
-  const existingByManagedId = new Map(existingConfigs.map((c) => [c.managedProductId, c]))
+  const existingByManagedId = new Map(allConfigs.filter((c) => c.active).map((c) => [c.managedProductId, c]))
+  // Tech Lead review PR #5, achado #5: mesmo bug do upsertBySku manual, so
+  // que no import -- sem config ativa mas com uma inativa, a linha nao pode
+  // virar CREATE silencioso (criaria uma segunda config ativa por cima).
+  // Import nao tem fluxo de reativacao, entao vira ERROR orientando o
+  // usuario a reativar pela tela de Embalagens antes de importar.
+  const inactiveByManagedId = new Map(allConfigs.filter((c) => !c.active).map((c) => [c.managedProductId, c]))
 
   const validated: ValidatedImportRow[] = rows.map((r) => {
-    const base = { line: r.line, sku: r.sku, nameFromFile: r.nameFromFile, sourceUnit: r.sourceUnit }
+    const base = { line: r.line, sheet: r.sheet, sku: r.sku, nameFromFile: r.nameFromFile, sourceUnit: r.sourceUnit }
     const errorRow = (message: string, extra: Partial<ValidatedImportRow> = {}): ValidatedImportRow => ({
       ...base,
       managedProductId: null,
@@ -112,6 +115,15 @@ export async function validateImportRows(rows: RawImportRow[]): Promise<ImportVa
     }
 
     const existing = existingByManagedId.get(managed.id)
+    if (!existing && inactiveByManagedId.has(managed.id)) {
+      return errorRow(`Existe uma configuração inativa para o SKU "${r.sku}". Reative-a na tela de Embalagens antes de importar.`, {
+        managedProductId: managed.id,
+        managedProductName: managed.wakeProductName,
+        cissProductId: managed.cissProductId,
+        detectedUnit: unitNormalized,
+      })
+    }
+
     const commonValid = {
       ...base,
       managedProductId: managed.id,

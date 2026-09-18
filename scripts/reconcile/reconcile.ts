@@ -1,4 +1,4 @@
-import type { CommercialPolicyConfig } from '../../src/lib/units'
+import type { CommercialPolicyConfig, PackageSourceUnit } from '../../src/lib/units'
 import type { CissStockOutcome } from './ciss-reader'
 import type { ManagedProductRow } from './db-readonly'
 import { classifyUnit, computeExpected, pricesMatch } from './rules'
@@ -60,8 +60,8 @@ export interface ReconcileInput {
   /** Por SKU. null = tabela nao lida (ver tableError). */
   wakeTable: Map<string, WakePriceTableEntry> | null
   tableError: string | null
-  /** ciss_product_id -> kg por caixa (so UNIT=KG). Vazio nesta rodada. */
-  packageWeights: Map<string, number>
+  /** ciss_product_id -> config de embalagem (KG/MT). Vazio nesta rodada -- nada popula isto a partir do banco real ainda (ver run.ts). */
+  packageWeights: Map<string, { sourceUnit: PackageSourceUnit; quantityPerSaleUnit: number }>
   /** Ponte read-only (FASE B.1, PROBLEMA 1): settings observados via db-readonly.ts (ver reconcile-readonly.ts). Ausente = DEFAULT_COMMERCIAL_POLICY_CONFIG. */
   commercialPolicyConfig?: CommercialPolicyConfig
 }
@@ -183,9 +183,16 @@ export function reconcileProduct(p: ManagedProductRow, input: ReconcileInput): R
   if (unit.kind === 'missing') return finish(row, 'UNSUPPORTED_UNIT', ['unit ausente no CISS', ...notes])
   if (unit.kind === 'unsupported') return finish(row, 'UNSUPPORTED_UNIT', [`unit nao suportada: "${unit.raw}"`, ...notes])
 
-  const weight = unit.unit === 'PACKAGE_MEASURED' ? (input.packageWeights.get(p.cissProductId) ?? null) : null
-  row.package_weight_kg = weight
-  const expected = computeExpected({ unitRaw: rec.unitRaw, cissPrice: price, cissStock: rec.quantity, packageWeightKg: weight, commercialPolicyConfig: input.commercialPolicyConfig })
+  const packageConfig = unit.unit === 'PACKAGE_MEASURED' ? (input.packageWeights.get(p.cissProductId) ?? null) : null
+  row.package_weight_kg = packageConfig?.quantityPerSaleUnit ?? null
+  const expected = computeExpected({
+    unitRaw: rec.unitRaw,
+    cissPrice: price,
+    cissStock: rec.quantity,
+    packageWeightKg: packageConfig?.quantityPerSaleUnit ?? null,
+    packageSourceUnit: packageConfig?.sourceUnit ?? null,
+    commercialPolicyConfig: input.commercialPolicyConfig,
+  })
   if (expected.kind === 'configuration_required') return finish(row, 'CONFIGURATION_REQUIRED', [expected.error, ...notes])
   if (expected.kind === 'invalid_input') return finish(row, 'ERROR', [expected.error, ...notes])
 

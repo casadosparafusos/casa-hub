@@ -43,6 +43,13 @@
       "when": 1789749370214,
       "tag": "0005_silent_red_skull",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789759057899,
+      "tag": "0006_events_check_constraints",
+      "breakpoints": true
     }
   ]
 }

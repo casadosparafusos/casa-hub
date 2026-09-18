@@ -167,6 +167,32 @@ export const productSaleUnitConfigEvents = sqliteTable(
   (t) => ({
     managedProductIdIdx: index('product_sale_unit_config_events_managed_product_id_idx').on(t.managedProductId),
     createdAtIdx: index('product_sale_unit_config_events_created_at_idx').on(t.createdAt),
+    // Tech Lead review PR #5, achado #8: mesmo bloqueio A/B de
+    // product_sale_unit_config (enum/quantidade so em TS, sem CHECK no SQL)
+    // se aplicava aqui -- uma insercao direta (fora do Drizzle) podia gravar
+    // action/origin/source_unit fora do enum, ou quantidade <= 0.
+    actionCheck: check('product_sale_unit_config_events_action_check', sql`${t.action} IN ('CREATE', 'UPDATE', 'DEACTIVATE', 'REACTIVATE')`),
+    originCheck: check('product_sale_unit_config_events_origin_check', sql`${t.origin} IN ('MANUAL', 'IMPORT')`),
+    sourceUnitCheck: check('product_sale_unit_config_events_source_unit_check', sql`${t.sourceUnit} IN ('KG', 'MT')`),
+    oldQuantityPositiveCheck: check(
+      'product_sale_unit_config_events_old_quantity_positive_check',
+      sql`${t.oldQuantityPerSaleUnit} IS NULL OR ${t.oldQuantityPerSaleUnit} > 0`,
+    ),
+    newQuantityPositiveCheck: check(
+      'product_sale_unit_config_events_new_quantity_positive_check',
+      sql`${t.newQuantityPerSaleUnit} IS NULL OR ${t.newQuantityPerSaleUnit} > 0`,
+    ),
+    // CREATE/REACTIVATE partem de "nao existia" (old=NULL, new preenchido);
+    // DEACTIVATE termina em "nao existe mais" (old preenchido, new=NULL);
+    // UPDATE tem os dois preenchidos (ver src/lib/measured-packages/service.ts).
+    actionQuantityShapeCheck: check(
+      'product_sale_unit_config_events_action_quantity_shape_check',
+      sql`
+        (${t.action} IN ('CREATE', 'REACTIVATE') AND ${t.oldQuantityPerSaleUnit} IS NULL AND ${t.newQuantityPerSaleUnit} IS NOT NULL) OR
+        (${t.action} = 'DEACTIVATE' AND ${t.oldQuantityPerSaleUnit} IS NOT NULL AND ${t.newQuantityPerSaleUnit} IS NULL) OR
+        (${t.action} = 'UPDATE' AND ${t.oldQuantityPerSaleUnit} IS NOT NULL AND ${t.newQuantityPerSaleUnit} IS NOT NULL)
+      `,
+    ),
   }),
 )
 

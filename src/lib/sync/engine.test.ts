@@ -461,6 +461,61 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
   })
 
+  // Tech Lead review PR #5, achado #1 (P1 CRITICO): config cadastrada para
+  // KG mas o CISS agora responde MT (ou vice-versa) -- antes do fix, o motor
+  // ignorava source_unit e continuava usando a quantidade cadastrada como se
+  // a UNIT nao tivesse mudado. Precisa falhar fechado, igual ao caso "sem
+  // config" acima.
+  it('PACKAGE_MEASURED com config cadastrada para KG mas CISS responde MT, escrita real: zero chamada a qualquer escritor Wake (fail-closed, nunca usa config de outra UNIT)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-KG-CFG-MT-MISMATCH' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'KG',
+      quantityPerSaleUnit: 5,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 17, unitRaw: 'MT' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(result.failedProducts).toBe(2) // preco + estoque
+    expect(result.appliedProducts).toBe(0)
+    expect(result.status).toBe('failed')
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.unitResolutionStatus).toBe('CONFIGURATION_REQUIRED')
+
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+
+  it('PACKAGE_MEASURED com config cadastrada para MT mas CISS responde KG, dry-run: zero item planned=ok, CONFIGURATION_REQUIRED persistido (fail-closed nos dois sentidos)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-MT-CFG-KG-MISMATCH' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'MT',
+      quantityPerSaleUnit: 12.5,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 8]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 100, unitRaw: 'KG' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.failedProducts).toBe(2)
+    expect(result.appliedProducts).toBe(0)
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.unitResolutionStatus).toBe('CONFIGURATION_REQUIRED')
+
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+
   it('HUNDRED (CT + FIXADOR_CENTO), escrita real: wholesalePrice e calculado/persistido mas NUNCA sai no payload do Wake', async () => {
     const product = await insertProduct({ wakeSku: 'SKU-CT-WRITE' })
     const variantId = Number(product.wakeProductVariantId)

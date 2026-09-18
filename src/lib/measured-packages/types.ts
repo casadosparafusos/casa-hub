@@ -50,6 +50,7 @@ export interface RawImportRow {
 
 export interface ValidatedImportRow {
   line: number
+  sheet: string
   sku: string
   nameFromFile: string | null
   managedProductId: number | null

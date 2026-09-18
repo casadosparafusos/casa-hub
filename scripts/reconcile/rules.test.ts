@@ -84,8 +84,23 @@ describe('computeExpected -- PACKAGE_MEASURED (KG/MT)', () => {
   })
 
   it('KG com 18kg/caixa -> 340/18 = 18 caixas, preco=180', () => {
-    const r = computeExpected({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageWeightKg: 18 })
+    const r = computeExpected({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageWeightKg: 18, packageSourceUnit: 'KG' })
     expect(r).toMatchObject({ kind: 'ok', expectedRetailPrice: 180, expectedStock: 18, expectedWholesalePrice: null })
+  })
+
+  it('CISS MT + config cadastrada para KG -> configuration_required (fail-closed, nunca usa config de outra UNIT)', () => {
+    const r = computeExpected({ unitRaw: 'MT', cissPrice: 10, cissStock: 50, packageWeightKg: 18, packageSourceUnit: 'KG' })
+    expect(r.kind).toBe('configuration_required')
+  })
+
+  it('CISS KG + config cadastrada para MT -> configuration_required (fail-closed, nunca usa config de outra UNIT)', () => {
+    const r = computeExpected({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageWeightKg: 18, packageSourceUnit: 'MT' })
+    expect(r.kind).toBe('configuration_required')
+  })
+
+  it('CISS MT + config cadastrada para MT -> ok (mesma UNIT, usa a config)', () => {
+    const r = computeExpected({ unitRaw: 'MT', cissPrice: 10, cissStock: 50, packageWeightKg: 5, packageSourceUnit: 'MT' })
+    expect(r).toMatchObject({ kind: 'ok', expectedStock: 10 })
   })
 })
 

@@ -161,6 +161,36 @@ describe('validateImportRows -- ordem de validacao do FASE E §10', () => {
     expect(result.noopCount).toBe(1)
   })
 
+  it('sem config ativa mas com uma inativa -- ERROR, nunca cria uma segunda config ativa por cima (Tech Lead review PR #5, achado #5)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-INACTIVE-CONFIG' })
+    await db.insert(schema.productSaleUnitConfig).values({ managedProductId: product.id, sourceUnit: 'KG', quantityPerSaleUnit: 10, active: false })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 180, unitRaw: 'KG' }])
+    const result = await validateImportRows([row({ sku: 'SKU-INACTIVE-CONFIG', quantity: 18 })])
+    expect(result.rows[0]).toMatchObject({ action: 'ERROR' })
+    expect(result.rows[0]?.message).toMatch(/inativa/)
+    expect(result.errorCount).toBe(1)
+  })
+
+  // Tech Lead review PR #5, achado #6: identidade da linha (sheet) precisa
+  // sobreviver ate o ValidatedImportRow -- sem isso, duas abas XLSX com o
+  // mesmo numero de linha ficam indistinguiveis no preview/relatorio.
+  it('sheet e propagado de RawImportRow pra ValidatedImportRow, inclusive em linhas de abas diferentes com o mesmo numero de linha', async () => {
+    const kgProduct = await insertProduct({ wakeSku: 'SKU-SHEET-KG' })
+    const mtProduct = await insertProduct({ wakeSku: 'SKU-SHEET-MT' })
+    mockFetchStockForProducts.mockResolvedValue([
+      { productId: kgProduct.cissProductId, stock: 180, unitRaw: 'KG' },
+      { productId: mtProduct.cissProductId, stock: 180, unitRaw: 'MT' },
+    ])
+
+    const result = await validateImportRows([
+      row({ sku: 'SKU-SHEET-KG', sheet: 'KG', line: 2, sourceUnit: 'KG', quantity: 18 }),
+      row({ sku: 'SKU-SHEET-MT', sheet: 'MT', line: 2, sourceUnit: 'MT', quantity: 5 }),
+    ])
+
+    expect(result.rows[0]).toMatchObject({ sheet: 'KG', line: 2, sku: 'SKU-SHEET-KG' })
+    expect(result.rows[1]).toMatchObject({ sheet: 'MT', line: 2, sku: 'SKU-SHEET-MT' })
+  })
+
   it('falha de infraestrutura no CISS -- aborta a validacao inteira (MeasuredPackageInfraError), nunca vira erro por linha', async () => {
     await insertProduct({ wakeSku: 'SKU-INFRA' })
     mockFetchStockForProducts.mockRejectedValue(new Error('timeout'))

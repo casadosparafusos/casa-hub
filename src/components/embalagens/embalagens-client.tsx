@@ -300,21 +300,23 @@ export function EmbalagensClient({
                 <td className="px-3 py-2 text-[var(--texto-suave)]">{c.updatedBy ?? '—'}</td>
                 <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openEditForm(c)}
-                      className="rounded-full border border-[var(--borda)] px-3 py-1 text-xs font-semibold text-[var(--texto)] transition-colors hover:bg-[var(--fundo-suave)]"
-                    >
-                      Editar
-                    </button>
                     {c.active ? (
-                      <button
-                        type="button"
-                        onClick={() => setDeactivateTarget(c)}
-                        className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-50"
-                      >
-                        Desativar
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => openEditForm(c)}
+                          className="rounded-full border border-[var(--borda)] px-3 py-1 text-xs font-semibold text-[var(--texto)] transition-colors hover:bg-[var(--fundo-suave)]"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeactivateTarget(c)}
+                          className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-50"
+                        >
+                          Desativar
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="button"
@@ -636,8 +638,8 @@ function ImportWizard({ onClose, onApplied }: { onClose: () => void; onApplied: 
                 </thead>
                 <tbody>
                   {preview.rows.map((r) => (
-                    <tr key={r.line} className="border-b border-[var(--borda)]">
-                      <td className="px-2 py-1.5">{r.line}</td>
+                    <tr key={`${r.sheet}:${r.line}:${r.sku}`} className="border-b border-[var(--borda)]">
+                      <td className="px-2 py-1.5">{r.sheet !== 'CSV' ? `${r.sheet}!${r.line}` : r.line}</td>
                       <td className="px-2 py-1.5 font-mono">{r.sku}</td>
                       <td className="px-2 py-1.5">{r.managedProductName ?? r.nameFromFile ?? '—'}</td>
                       <td className="px-2 py-1.5">{r.detectedUnit ?? '—'}</td>

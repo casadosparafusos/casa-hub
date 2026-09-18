@@ -19,6 +19,7 @@
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "clsx": "^2.1.1",
+    "csv-parse": "^7.0.2",
     "drizzle-orm": "^0.38.4",
     "exceljs": "^4.4.0",
     "next": "^15.5.23",

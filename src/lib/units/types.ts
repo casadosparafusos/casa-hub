@@ -10,6 +10,8 @@ export type CommercialPolicyKind = 'NONE' | 'FIXADOR_CENTO'
 export type UnitResolutionFailure = 'UNSUPPORTED_UNIT' | 'CONFIGURATION_REQUIRED'
 
 export interface PackageSaleUnitConfig {
+  /** UNIT (KG/MT) para a qual esta config foi cadastrada. Comparada contra a UNIT real do CISS no momento do calculo -- ver compute.ts PACKAGE_MEASURED. */
+  sourceUnit: PackageSourceUnit
   quantityPerSaleUnit: number
 }
 

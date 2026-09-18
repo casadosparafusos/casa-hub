@@ -177,6 +177,22 @@ describe('upsertBySku -- FASE E §4 (UNIT sempre resolvido no CISS, nunca digita
     mockFetchStockForProducts.mockRejectedValue(new Error('ECONNRESET'))
     await expect(upsertBySku({ sku: 'SKU-INFRA', quantity: 1, actor: 'tester' })).rejects.toThrow(MeasuredPackageInfraError)
   })
+
+  // Tech Lead review PR #5, achado #5: sem config ativa mas com uma
+  // inativa, o POST manual nao pode criar uma segunda ativa por cima --
+  // precisa reativar a existente (reactivateConfig), nunca upsertBySku.
+  it('sem config ativa mas com uma inativa -- MeasuredPackageError, nunca cria uma segunda ativa por cima', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-INATIVA-EXISTE' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
+    const first = await upsertBySku({ sku: 'SKU-INATIVA-EXISTE', quantity: 10, actor: 'tester' })
+    await deactivateConfig(first.id, 'tester')
+
+    await expect(upsertBySku({ sku: 'SKU-INATIVA-EXISTE', quantity: 5, actor: 'tester2' })).rejects.toThrow(/inativa/)
+
+    const configs = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.managedProductId, product.id))
+    expect(configs).toHaveLength(1)
+    expect(configs[0]?.active).toBe(false)
+  })
 })
 
 describe('deactivateConfig / reactivateConfig -- FASE E §4 (nunca hard-delete)', () => {
@@ -226,8 +242,10 @@ describe('deactivateConfig / reactivateConfig -- FASE E §4 (nunca hard-delete)'
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
     const first = await upsertBySku({ sku: 'SKU-REACT2', quantity: 10, actor: 'tester' })
     await deactivateConfig(first.id, 'tester')
-    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'MT' }])
-    await upsertBySku({ sku: 'SKU-REACT2', quantity: 3, actor: 'tester' }) // nova ativa
+    // Insercao direta no banco (nao via upsertBySku, que agora bloqueia
+    // criar uma segunda ativa quando ha uma inativa -- achado #5) so pra
+    // montar o cenario de teste "ja existe outra ativa".
+    await db.insert(schema.productSaleUnitConfig).values({ managedProductId: product.id, sourceUnit: 'MT', quantityPerSaleUnit: 3, active: true })
 
     await expect(reactivateConfig(first.id, 'tester')).rejects.toThrow(MeasuredPackageError)
   })
@@ -241,6 +259,101 @@ describe('deactivateConfig / reactivateConfig -- FASE E §4 (nunca hard-delete)'
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
     const config = await upsertBySku({ sku: 'SKU-REACT3', quantity: 10, actor: 'tester' })
     await expect(reactivateConfig(config.id, 'tester')).rejects.toThrow(MeasuredPackageError)
+  })
+})
+
+// Tech Lead review PR #5, achado #2 (P1): reativar so pela existencia da
+// linha era inseguro -- precisa revalidar produto ativo + UNIT real do CISS
+// (e a mesma UNIT da config) antes de reativar. Qualquer bloqueio = zero
+// escrita no banco e zero evento REACTIVATE.
+describe('reactivateConfig -- revalidacao de produto/CISS (Tech Lead review PR #5, achado #2)', () => {
+  it('produto foi desativado na whitelist desde a desativacao da config -- MeasuredPackageError, zero write, zero evento CISS', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-REACT-PRODINATIVO' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
+    const config = await upsertBySku({ sku: 'SKU-REACT-PRODINATIVO', quantity: 10, actor: 'tester' })
+    await deactivateConfig(config.id, 'tester')
+    await db.update(schema.managedProducts).set({ active: false }).where(eq(schema.managedProducts.id, product.id))
+    mockFetchStockForProducts.mockClear()
+
+    await expect(reactivateConfig(config.id, 'tester')).rejects.toThrow(MeasuredPackageError)
+    expect(mockFetchStockForProducts).not.toHaveBeenCalled()
+
+    const [row] = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.id, config.id))
+    expect(row?.active).toBe(false)
+    const events = await db.select().from(schema.productSaleUnitConfigEvents).where(eq(schema.productSaleUnitConfigEvents.managedProductId, product.id))
+    expect(events.map((e) => e.action)).toEqual(['CREATE', 'DEACTIVATE'])
+  })
+
+  it('CISS agora responde UNIT diferente da config (KG cadastrado, CISS responde MT) -- MeasuredPackageError, zero write', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-REACT-KGMT' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
+    const config = await upsertBySku({ sku: 'SKU-REACT-KGMT', quantity: 10, actor: 'tester' })
+    await deactivateConfig(config.id, 'tester')
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'MT' }])
+
+    await expect(reactivateConfig(config.id, 'tester')).rejects.toThrow(/incompat[íi]vel/)
+
+    const [row] = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.id, config.id))
+    expect(row?.active).toBe(false)
+    const events = await db.select().from(schema.productSaleUnitConfigEvents).where(eq(schema.productSaleUnitConfigEvents.managedProductId, product.id))
+    expect(events.map((e) => e.action)).toEqual(['CREATE', 'DEACTIVATE'])
+  })
+
+  it('CISS agora responde UNIT nao-KG/MT (ex: PC) -- MeasuredPackageError, zero write', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-REACT-PC' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
+    const config = await upsertBySku({ sku: 'SKU-REACT-PC', quantity: 10, actor: 'tester' })
+    await deactivateConfig(config.id, 'tester')
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'PC' }])
+
+    await expect(reactivateConfig(config.id, 'tester')).rejects.toThrow(/PC/)
+
+    const [row] = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.id, config.id))
+    expect(row?.active).toBe(false)
+  })
+
+  it('CISS nao retorna UNIT (null/noRecord) -- MeasuredPackageError "nao retornou UNIT", zero write', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-REACT-NORECORD' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
+    const config = await upsertBySku({ sku: 'SKU-REACT-NORECORD', quantity: 10, actor: 'tester' })
+    await deactivateConfig(config.id, 'tester')
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 0, noRecord: true, unitRaw: null }])
+
+    await expect(reactivateConfig(config.id, 'tester')).rejects.toThrow(/não retornou UNIT/)
+
+    const [row] = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.id, config.id))
+    expect(row?.active).toBe(false)
+  })
+
+  it('falha de infraestrutura no CISS durante reativacao -- MeasuredPackageInfraError propaga, zero write, zero evento', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-REACT-INFRA' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 10, unitRaw: 'KG' }])
+    const config = await upsertBySku({ sku: 'SKU-REACT-INFRA', quantity: 10, actor: 'tester' })
+    await deactivateConfig(config.id, 'tester')
+    mockFetchStockForProducts.mockRejectedValue(new Error('ECONNRESET'))
+
+    await expect(reactivateConfig(config.id, 'tester')).rejects.toThrow(MeasuredPackageInfraError)
+
+    const [row] = await db.select().from(schema.productSaleUnitConfig).where(eq(schema.productSaleUnitConfig.id, config.id))
+    expect(row?.active).toBe(false)
+    const events = await db.select().from(schema.productSaleUnitConfigEvents).where(eq(schema.productSaleUnitConfigEvents.managedProductId, product.id))
+    expect(events.map((e) => e.action)).toEqual(['CREATE', 'DEACTIVATE'])
+  })
+
+  it('CISS confirma mesma UNIT da config (MT) -- reativa normalmente e grava REACTIVATE', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-REACT-MTOK' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 20, unitRaw: 'MT' }])
+    const config = await upsertBySku({ sku: 'SKU-REACT-MTOK', quantity: 4, actor: 'tester' })
+    await deactivateConfig(config.id, 'tester')
+    mockFetchStockForProducts.mockClear()
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 20, unitRaw: 'MT' }])
+
+    const reactivated = await reactivateConfig(config.id, 'tester3')
+    expect(reactivated.active).toBe(true)
+    expect(mockFetchStockForProducts).toHaveBeenCalledTimes(1)
+
+    const events = await db.select().from(schema.productSaleUnitConfigEvents).where(eq(schema.productSaleUnitConfigEvents.managedProductId, product.id))
+    expect(events.map((e) => e.action)).toEqual(['CREATE', 'DEACTIVATE', 'REACTIVATE'])
   })
 })
 

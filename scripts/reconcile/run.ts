@@ -1,4 +1,4 @@
-import type { CommercialPolicyConfig } from '../../src/lib/units'
+import type { CommercialPolicyConfig, PackageSourceUnit } from '../../src/lib/units'
 import { CissAbortError, CissReader, type CissReaderOptions, type CissStockOutcome } from './ciss-reader'
 import type { ManagedProductRow } from './db-readonly'
 import type { FetchLike } from './http'
@@ -47,7 +47,7 @@ export interface RunConfig {
   cissOptions?: Partial<Omit<CissReaderOptions, 'token' | 'fetchImpl'>>
   /** Limita a varredura de /produtos ao intervalo de produtoVarianteId da whitelist. */
   useVariantRange: boolean
-  packageWeights?: Map<string, number>
+  packageWeights?: Map<string, { sourceUnit: PackageSourceUnit; quantityPerSaleUnit: number }>
   /** Ponte read-only (FASE B.1, PROBLEMA 1): settings observados, montados em reconcile-readonly.ts. Ausente = DEFAULT_COMMERCIAL_POLICY_CONFIG. */
   commercialPolicyConfig?: CommercialPolicyConfig
   log?: (msg: string) => void

@@ -1,9 +1,10 @@
 import 'server-only'
+import { parse } from 'csv-parse/sync'
 import ExcelJS from 'exceljs'
 import type { PackageSourceUnit, RawImportRow } from './types'
 import { MeasuredPackageError } from './types'
 
-const MAX_FILE_BYTES = 5 * 1024 * 1024
+export const MAX_FILE_BYTES = 5 * 1024 * 1024
 const MAX_ROWS = 5000
 
 function normalizeHeader(value: string): string {
@@ -20,27 +21,41 @@ function parseQuantity(raw: string): number | null {
   return n
 }
 
-function detectUnitColumn(headers: string[]): { unit: PackageSourceUnit; index: number } | null {
+// Tech Lead review PR #5, achado #4: cabecalho com AMBAS as colunas "QT KG"
+// e "QT MT" e ambiguo (arquivo bagunçado/gerado errado) -- fail-closed,
+// nunca escolhe uma das duas silenciosamente.
+type UnitColumnResult = { kind: 'ok'; unit: PackageSourceUnit; index: number } | { kind: 'ambiguous' } | { kind: 'missing' }
+
+function detectUnitColumn(headers: string[]): UnitColumnResult {
   const kgIdx = headers.indexOf('QT KG')
-  if (kgIdx >= 0) return { unit: 'KG', index: kgIdx }
   const mtIdx = headers.indexOf('QT MT')
-  if (mtIdx >= 0) return { unit: 'MT', index: mtIdx }
-  return null
+  if (kgIdx >= 0 && mtIdx >= 0) return { kind: 'ambiguous' }
+  if (kgIdx >= 0) return { kind: 'ok', unit: 'KG', index: kgIdx }
+  if (mtIdx >= 0) return { kind: 'ok', unit: 'MT', index: mtIdx }
+  return { kind: 'missing' }
 }
 
-function splitDelimitedLine(line: string, delimiter: string): string[] {
-  return line.split(delimiter).map((c) => c.trim())
-}
-
+// Tech Lead review PR #5, achado #3: `line.split(delimiter)` nao e CSV real
+// -- quebra em qualquer campo entre aspas (nome com virgula, quantidade com
+// virgula decimal). csv-parse/sync implementa RFC4180 (aspas, aspas
+// escapadas "", multi-linha dentro de campo). O delimitador ainda e
+// detectado pela primeira linha (falta de sniffing melhor no csv-parse
+// para , vs ;), igual antes.
 function parseDelimitedTable(text: string): string[][] {
   const clean = text.replace(/^﻿/, '')
-  const lines = clean.split(/\r?\n/).filter((l) => l.trim().length > 0)
-  if (lines.length === 0) return []
-  const headerLine = lines[0]!
-  const semicolons = (headerLine.match(/;/g) ?? []).length
-  const commas = (headerLine.match(/,/g) ?? []).length
+  const firstLine = clean.split(/\r?\n/, 1)[0] ?? ''
+  const semicolons = (firstLine.match(/;/g) ?? []).length
+  const commas = (firstLine.match(/,/g) ?? []).length
   const delimiter = semicolons > commas ? ';' : ','
-  return lines.map((line) => splitDelimitedLine(line, delimiter))
+
+  const records = parse(clean, {
+    bom: true,
+    delimiter,
+    trim: true,
+    skip_empty_lines: true,
+    relax_column_count: true,
+  }) as string[][]
+  return records
 }
 
 export function parseCsv(content: string): RawImportRow[] {
@@ -51,7 +66,10 @@ export function parseCsv(content: string): RawImportRow[] {
   const skuIdx = headers.indexOf('SKU')
   const nomeIdx = headers.indexOf('NOME')
   const unitCol = detectUnitColumn(headers)
-  if (skuIdx < 0 || !unitCol) {
+  if (unitCol.kind === 'ambiguous') {
+    throw new MeasuredPackageError('Cabeçalho ambíguo -- a planilha tem as colunas "QT KG" e "QT MT" ao mesmo tempo. Envie apenas uma delas por arquivo.')
+  }
+  if (skuIdx < 0 || unitCol.kind === 'missing') {
     throw new MeasuredPackageError('Cabeçalho inválido -- esperado ao menos as colunas "SKU" e "QT KG" ou "QT MT".')
   }
 
@@ -94,9 +112,18 @@ export async function parseXlsx(buffer: Buffer): Promise<RawImportRow[]> {
     const skuIdx = headers.indexOf('SKU')
     const nomeIdx = headers.indexOf('NOME')
     const unitCol = detectUnitColumn(headers)
+    // Tech Lead review PR #5, achado #4: aba com coluna SKU + as DUAS
+    // colunas QT KG/QT MT e ambigua -- bloqueio explicito, nunca escolhe
+    // uma silenciosamente. Aba sem SKU (aux/instrucoes) continua ignorada
+    // mesmo se por acaso tiver ambas as colunas de quantidade.
+    if (skuIdx >= 0 && unitCol.kind === 'ambiguous') {
+      throw new MeasuredPackageError(
+        `Aba "${worksheet.name}": cabeçalho ambíguo -- tem as colunas "QT KG" e "QT MT" ao mesmo tempo. Envie apenas uma delas por aba.`,
+      )
+    }
     // Aba sem o cabecalho esperado e ignorada (pode ser aba auxiliar/instrucoes) --
     // nunca usa o NOME da aba pra decidir UNIT (§8).
-    if (skuIdx < 0 || !unitCol) continue
+    if (skuIdx < 0 || unitCol.kind !== 'ok') continue
 
     const lastRow = worksheet.rowCount
     for (let r = 2; r <= lastRow; r++) {

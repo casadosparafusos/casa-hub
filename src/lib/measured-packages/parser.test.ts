@@ -21,13 +21,35 @@ describe('parseCsv -- FASE E §6/§8', () => {
     expect(rows[0]).toMatchObject({ sku: 'XYZ-1', sourceUnit: 'MT', quantity: 10 })
   })
 
-  it('decimal com virgula e convertido pra numero (12,5 -> 12.5)', () => {
-    const rows = parseCsv('SKU,NOME,QT KG\nABC-1,Produto A,12,5'.replace('Produto A,12,5', 'Produto A,"12,5"'))
-    // formato realista: sem aspas o parser de linha simples quebraria a
-    // coluna extra -- testamos o parseQuantity isolado via uma coluna limpa
-    const clean = parseCsv('SKU;NOME;QT KG\nABC-1;Produto A;12,5')
-    expect(clean[0]?.quantity).toBe(12.5)
-    expect(rows[0]?.parseError).toBeTruthy() // documenta a limitacao: CSV sem aspas quebra em virgula
+  it('decimal com virgula (separador ; ) e convertido pra numero (12,5 -> 12.5)', () => {
+    const rows = parseCsv('SKU;NOME;QT KG\nABC-1;Produto A;12,5')
+    expect(rows[0]?.quantity).toBe(12.5)
+    expect(rows[0]?.parseError).toBeNull()
+  })
+
+  // Tech Lead review PR #5, achado #3: parser real de CSV (RFC4180) --
+  // campo entre aspas protege virgula/quebra interna do delimitador.
+  it('campo entre aspas com virgula dentro (nome) nao quebra a coluna', () => {
+    const rows = parseCsv('SKU,NOME,QT KG\nABC-1,"Silva, Produto A",18')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ sku: 'ABC-1', nameFromFile: 'Silva, Produto A', sourceUnit: 'KG', quantity: 18, parseError: null })
+  })
+
+  it('decimal com virgula entre aspas (separador , ) e convertido pra numero, nao quebra a coluna', () => {
+    const rows = parseCsv('SKU,NOME,QT KG\nABC-1,Produto A,"12,5"')
+    expect(rows[0]?.quantity).toBe(12.5)
+    expect(rows[0]?.parseError).toBeNull()
+  })
+
+  it('aspas escapadas ("") dentro de campo entre aspas viram uma aspas literal', () => {
+    const rows = parseCsv('SKU,NOME,QT KG\nABC-1,"Produto ""Especial""",18')
+    expect(rows[0]?.nameFromFile).toBe('Produto "Especial"')
+  })
+
+  it('separador ; com decimal em virgula em varias linhas', () => {
+    const rows = parseCsv('SKU;NOME;QT MT\nXYZ-1;Produto X;10,5\nXYZ-2;Produto Y;3,25')
+    expect(rows[0]?.quantity).toBe(10.5)
+    expect(rows[1]?.quantity).toBe(3.25)
   })
 
   it('remove BOM UTF-8 do inicio do arquivo', () => {
@@ -49,6 +71,12 @@ describe('parseCsv -- FASE E §6/§8', () => {
 
   it('cabecalho sem SKU ou sem QT KG/QT MT -- lanca erro, nunca infere pelo nome da aba/arquivo', () => {
     expect(() => parseCsv('CODIGO,NOME,QUANTIDADE\nABC-1,Produto A,18')).toThrow(MeasuredPackageError)
+  })
+
+  // Tech Lead review PR #5, achado #4: cabecalho com as DUAS colunas QT
+  // KG/QT MT ao mesmo tempo e ambiguo -- fail-closed, nunca escolhe uma.
+  it('cabecalho com QT KG e QT MT ao mesmo tempo -- lanca erro de ambiguidade, nunca escolhe uma', () => {
+    expect(() => parseCsv('SKU,NOME,QT KG,QT MT\nABC-1,Produto A,18,5')).toThrow(/ambíguo/)
   })
 
   it('arquivo vazio -- lanca erro', () => {
@@ -140,6 +168,17 @@ describe('parseXlsx -- FASE E §6/§8', () => {
       sheet.addRow(['CODIGO', 'DESCRICAO'])
     })
     await expect(parseXlsx(buffer)).rejects.toThrow(MeasuredPackageError)
+  })
+
+  // Tech Lead review PR #5, achado #4: mesma regra fail-closed de ambiguidade
+  // vale pra aba XLSX (nao so CSV).
+  it('aba com SKU + QT KG e QT MT ao mesmo tempo -- lanca erro de ambiguidade, nunca escolhe uma', async () => {
+    const buffer = await buildWorkbookBuffer((wb) => {
+      const sheet = wb.addWorksheet('Ambiguo')
+      sheet.addRow(['SKU', 'NOME', 'QT KG', 'QT MT'])
+      sheet.addRow(['ABC-1', 'Produto A', 18, 5])
+    })
+    await expect(parseXlsx(buffer)).rejects.toThrow(/ambíguo/)
   })
 })
 
