@@ -95,22 +95,28 @@ Censo READ-ONLY completo (22323 produtos, 13 siglas) em `CISS_UNIT_MAP.md`. Mapa
 - simulação;
 - toggle whitelist.
 
-## FASE 7 — Embalagens KG/MT — P1 — schema pronta em `feat/unit-strategies`; UI/CRUD ainda PENDENTE
+## FASE 7 — Embalagens KG/MT — P1 — schema pronta desde `feat/unit-strategies`; CRUD/UI/importação implementados em `feat/measured-packages-admin` (FASE E, 18/09/2026), aguardando Draft PR + revisão/merge
 
 - Caixas → Embalagens (`KG` e `MT`, não só KG) — **feito** (motor);
-- tabela genérica `product_sale_unit_config` (campos: `managed_product_id, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by` — `wake_sku` removida na FASE B.2, SKU só via JOIN com `managed_products`) — **feito**, migration `0003_unit_strategies_schema.sql` + `0004_public_betty_brant.sql` (FASE B.2), não aplicada em produção; integridade (FK/unicidade/CHECK `quantity_per_sale_unit>0` na FASE B.1, CHECK `source_unit IN ('KG','MT')` na FASE B.2) provada contra banco real; **sem camada de acesso/CRUD ou UI própria ainda** — hoje só é populável direto no banco;
-- UI: rótulo `QT KG` ou `QT MT` conforme `source_unit` — **pendente**;
-- preview — **pendente**;
-- status configuração (`CONFIGURATION_REQUIRED` quando ausente/inválido) — **feito** no motor (`calculateUnitPrice`/`calculateUnitStock`), sem exposição na UI ainda;
+- tabela genérica `product_sale_unit_config` (campos: `managed_product_id, source_unit, quantity_per_sale_unit, active, created_at, updated_at, updated_by` — `wake_sku` removida na FASE B.2, SKU só via JOIN com `managed_products`) — **feito**, migration `0003_unit_strategies_schema.sql` + `0004_public_betty_brant.sql` (FASE B.2), não aplicada em produção; integridade (FK/unicidade/CHECK `quantity_per_sale_unit>0` na FASE B.1, CHECK `source_unit IN ('KG','MT')` na FASE B.2) provada contra banco real;
+- **camada de CRUD + UI própria — feito na FASE E**: `/embalagens` (`src/app/(app)/embalagens/page.tsx` + `src/components/embalagens/embalagens-client.tsx`), APIs internas autenticadas (`src/app/api/embalagens/{route,[id]/route}.ts`), validação contra a whitelist de `managed_products` e a UNIT real do CISS;
+- UI: rótulo `QT KG` ou `QT MT` conforme `source_unit` — **feito na FASE E**;
+- preview — **feito na FASE E** (obrigatório antes de aplicar, tanto no CRUD manual quanto na importação por planilha);
+- status configuração (`CONFIGURATION_REQUIRED` quando ausente/inválido) — **feito** no motor (`calculateUnitPrice`/`calculateUnitStock`) desde a FASE B; exposto na UI a partir da FASE E;
 - preço da unidade de venda — **feito** no motor;
-- estoque da unidade de venda — **feito** no motor.
+- estoque da unidade de venda — **feito** no motor;
+- **migration nova de histórico/auditoria `product_sale_unit_config_events` — feito na FASE E**: registra quem alterou o quê e quando, sem mudar o schema/contrato de `product_sale_unit_config`; não aplicada em produção.
 
-### Importação por planilha (roadmap, não implementar antes desta fase)
+### Importação por planilha — feito em `feat/measured-packages-admin` (FASE E, 18/09/2026)
 
-- KG: `SKU | NOME | QT KG`; MT: `SKU | NOME | QT MT`;
-- validar contra a UNIT real do CISS (rejeitar SKU com UNIT incompatível, SKU ausente, quantidade <= 0; reportar duplicados);
-- fluxo: upload → preview → validação → válidos/inválidos → confirmação → import → relatório → audit log;
-- a modelagem de `product_sale_unit_config` criada nesta fase não pode bloquear esta importação futura.
+- KG: `SKU | NOME | QT KG`; MT: `SKU | NOME | QT MT` — **feito** (`.csv` e `.xlsx`, `src/lib/measured-packages/parser.ts`);
+- validar contra a UNIT real do CISS (rejeitar SKU com UNIT incompatível, SKU ausente/fora da whitelist/inativo, quantidade <= 0; nunca inferir UNIT pelo nome da aba/arquivo; fórmula de célula nunca lida/executada) — **feito**, `src/lib/measured-packages/service.ts`;
+- fluxo: upload → preview → validação → válidos/inválidos → confirmação → import → relatório → audit log — **feito** (preview obrigatório antes de aplicar; audit log é a migration `product_sale_unit_config_events` acima);
+- a modelagem de `product_sale_unit_config` desta fase não bloqueou a importação — **confirmado**;
+- limites de 5MB e 5000 linhas, parser `server-only` (nunca no bundle client) — **feito**;
+- `GET /api/embalagens/template` devolve `.xlsx` de exemplo real — **feito**;
+- prova end-to-end com o exemplo canônico (18kg/R$12/180kg → R$216/10 unidades, ponta a ponta via `runSync()`) — **feito**, 3 testes dedicados em `src/lib/sync/engine.test.ts`;
+- Testes: 621 no total (560 da FASE D-PRE + 61 líquidos novos da FASE E); `tsc --noEmit`, `vitest run` e `npm run build` limpos. **Não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS.**
 
 ## FASE 8 — Dashboard realtime — P1
 

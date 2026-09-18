@@ -311,6 +311,36 @@ Docblock de `updateWakeStock()` e comentário de verificação de ACK em `syncSt
 
 Testes: **542 no total, 24 arquivos** (514 da primeira rodada desta fase + 28 líquidos novos dos fixes #1/#2/#3/#4/#5 desta segunda rodada de revisão do Tech Lead no PR #4). `tsc --noEmit`, `vitest run` e `npm run build` limpos. Não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS. FASE D real de rollout continua BLOCKED por SSH/credenciais.
 
+## FASE E — Embalagens KG/MT (`feat/measured-packages-admin`, 18/09/2026)
+
+O motor matemático de embalagem medida (`computeUnit()`/`computeMeasuredPackage()`, `src/lib/units/`) e a tabela `product_sale_unit_config` já existiam desde a FASE B/B.2 — o roadmap (FASE 7) deixava como pendência explícita só a camada de CRUD/UI/importação por cima desse motor, nunca o motor em si. Esta fase constrói exatamente essa camada, sem reprojetar nem duplicar o que já existe: nenhuma tabela nova de configuração, nenhuma nova função de cálculo, nenhuma mudança no contrato de `product_sale_unit_config` ou no motor de sync (`runSync()`). Branch sobre `main` (`5d94b9b`, já com FASE C/C.1/C.2/D-PRE mergeadas via PR #3/#4). Escopo só código local + migration nova de histórico/auditoria + APIs internas autenticadas + UI `/embalagens` + dependência server-only para `.xlsx` + testes — sem produção, SSH, migration em produção, deploy, escrita real Wake/CISS, correção dos 16 PC, remediação do KG real, alteração da promoção 10365, início da FASE D real de rollout, ou merge desta fase.
+
+### CRUD manual valida contra a UNIT real do CISS, nunca por inferência
+
+`src/app/api/embalagens/route.ts` e `[id]/route.ts` (mais a UI `src/app/(app)/embalagens/page.tsx` + `src/components/embalagens/embalagens-client.tsx`) permitem cadastrar `quantity_per_sale_unit` por produto. A decisão de arquitetura central: a UNIT de origem (KG ou MT) nunca é decidida pelo cadastro em si — ela é sempre lida do CISS via `managed_products` (a mesma whitelist que já governa o resto do app). Um SKU fora da whitelist, inativo, ou cuja UNIT no CISS não seja KG/MT é rejeitado na API com uma mensagem específica em português, nunca aceito silenciosamente por nome/categoria parecerem certos. Isso preserva a regra de ouro da FASE B: UNIT é fato do ERP, não do operador do Casa Hub.
+
+### Importação por planilha: preview obrigatório, UNIT nunca inferida pelo arquivo, fórmula nunca executada
+
+`src/lib/measured-packages/{parser,service,types}.ts` implementam exatamente o desenho que o roadmap (FASE 7) já previa: cabeçalho `SKU | NOME | QT KG` ou `QT MT` em `.csv`/`.xlsx`, fluxo upload → preview → validação → confirmação → import → relatório → audit log. Três decisões de segurança/correção deliberadas:
+- **UNIT nunca vem do nome da aba ou do arquivo** — só do cabeçalho de coluna (`QT KG` vs `QT MT`) cruzado com a UNIT real do CISS; uma aba chamada "MT" com cabeçalho `QT KG` é lida como KG (testado em `parser.test.ts`);
+- **fórmula de célula nunca é lida nem executada** — uma fórmula na coluna SKU ou quantidade sempre vira erro de linha, nunca um valor calculado (evita tanto bug de parsing quanto um vetor de injeção de fórmula);
+- **preview é uma etapa obrigatória e separada de aplicar** — o endpoint de import sempre roda primeiro em modo de pré-visualização; aplicar é uma chamada explícita subsequente, nunca implícita num único POST.
+Limites de 5MB e 5000 linhas; parser roda com `import 'server-only'` (nunca enviado ao bundle client, já que `.xlsx` parsing não precisa nem deve rodar no navegador). `GET /api/embalagens/template` devolve um `.xlsx` de exemplo real.
+
+### Migration de histórico/auditoria não reprojeta o schema existente
+
+Nova tabela `product_sale_unit_config_events` registra quem alterou o quê e quando (cadastro manual ou importação), como um log de auditoria apenas-append ao lado de `product_sale_unit_config` — não uma coluna nova nem uma mudança de schema na tabela existente. Não aplicada em produção nesta fase.
+
+### Prova end-to-end com o exemplo canônico do documento de especificação
+
+Além da cobertura pré-existente de `PACKAGE_MEASURED` desde a FASE B, 3 testes novos e dedicados em `src/lib/sync/engine.test.ts` rodam o exemplo canônico ponta a ponta via `runSync()`: `quantity_per_sale_unit=18` (KG), preço CISS R$12/KG, estoque CISS 180KG → preço Wake R$216,00 (12×18), estoque Wake 10 unidades (`floor(180/18)`) — os números exatos do documento. Mais um caso de resto (181KG → ainda 10 unidades, o 1KG excedente nunca vira unidade extra) e um caso MT com quantidade decimal (12,5 MT, R$8/MT, 100MT → R$100,00/8 unidades), confirmando que a mesma lógica vale para KG e MT e que a UNIT é sempre lida do CISS, nunca do cadastro de embalagem em si.
+
+### Verificação funcional no navegador (dev local)
+
+Confirmados manualmente: estado vazio da listagem em `/embalagens`; modal "Configurar produto" incluindo o caminho de erro real (POST 400 com a mensagem correta de SKU fora da whitelist); modal "Importar planilha" confirmando que a UI força pré-visualização antes de qualquer aplicação; download do modelo `.xlsx` confirmado por fetch direto. Não cobertos nesta rodada por falta de dados de seed reais no banco de dev local (julgado de retorno decrescente frente à cobertura automatizada já existente para os mesmos caminhos de código): linhas com KG/MT já ativo populadas, diálogo de confirmação de aplicação, fluxo de desativação, viewport mobile.
+
+Testes: **621 no total, 27 arquivos** (560 da FASE D-PRE + 58 de embalagens/CRUD/import de rodadas anteriores desta fase + 3 novos de prova end-to-end nesta rodada). `tsc --noEmit`, `vitest run` e `npm run build` limpos (build é a primeira vez que passa nesta fase; typecheck exigiu 10 correções pontuais sem mudança de comportamento em `import.test.ts`/`parser.test.ts`). Não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, os 16 PC continuam não corrigidos, KG real não remediado, promoção 10365 inalterada, FASE D real de rollout não iniciada.
+
 ## Realtime
 
 POST manual:

@@ -1,5 +1,19 @@
 # CHANGELOG — documentação
 
+## v14 — 18/09/2026
+
+FASE E (`feat/measured-packages-admin`, sobre `main` já com FASE C/C.1/C.2 mergeadas via PR #3, `5d94b9b`): CRUD + importação por planilha de Embalagens KG/MT, sobre o motor matemático e a tabela `product_sale_unit_config` já existentes desde a FASE B/B.2 (não duplicados/reprojetados). UNIT continua vindo só do CISS; a planilha só fornece `quantity_per_sale_unit`. Escopo só código local + migration nova de histórico/auditoria + APIs internas autenticadas + UI `/embalagens` + testes, sem produção/SSH/deploy/migration em produção/escrita real Wake/CISS/merge desta fase. Ver detalhes em `STATUS.md` (seção "FASE E").
+
+Mudanças:
+- **CRUD manual de embalagens** (`src/app/api/embalagens/route.ts`, `[id]/route.ts`, UI `src/app/(app)/embalagens/page.tsx` + `src/components/embalagens/embalagens-client.tsx`): cadastro de `quantity_per_sale_unit` por produto, validado contra a whitelist de `managed_products` e a UNIT real do CISS — SKU fora da whitelist/inativo/UNIT incompatível rejeitado com mensagem específica, nunca aceito por inferência de nome/categoria;
+- **Importação por planilha** (`src/lib/measured-packages/{parser,service,types}.ts`, rotas `import`/`template`): `.csv`/`.xlsx` com cabeçalho `SKU | NOME | QT KG` ou `QT MT`; UNIT nunca inferida pelo nome da aba/arquivo; fórmula de célula nunca lida/executada (vira erro de linha); preview obrigatório antes de aplicar; limites de 5MB/5000 linhas; parser `server-only` (nunca no bundle client); `GET /api/embalagens/template` devolve `.xlsx` de exemplo real;
+- **Migration nova `product_sale_unit_config_events`**: histórico/auditoria de quem alterou o quê e quando (cadastro manual ou import), sem alterar o schema/contrato de `product_sale_unit_config` nem o motor de sync; não aplicada em produção;
+- **Prova end-to-end com o exemplo canônico do documento** (3 testes novos em `src/lib/sync/engine.test.ts`): `quantity_per_sale_unit=18` (KG), preço CISS R$12/KG, estoque CISS 180KG → preço Wake R$216,00, estoque Wake 10 unidades, ponta a ponta via `runSync()`; mais um caso de resto (181KG → ainda 10 unidades) e um caso MT decimal (12,5 MT, R$8/MT, 100MT → R$100,00/8 unidades);
+- **Verificação visual/funcional no navegador**: estado vazio, modal manual com caminho de erro real (POST 400), modal de import confirmando pré-visualização obrigatória, download do modelo confirmado por fetch direto;
+- **2 correções de typecheck sem mudança de comportamento**: 9 acessos de índice de array sem guarda (`result.rows[0].xxx` → `?.`) em `import.test.ts`; 1 variável morta removida em `parser.test.ts`;
+- 621 testes no total (560 da FASE D-PRE + 58 de embalagens de rodadas anteriores desta fase + 3 líquidos novos de prova end-to-end); `tsc --noEmit`, `vitest run` e `npm run build` limpos (primeira vez que o build passa nesta fase);
+- **não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, os 16 PC não corrigidos, KG real não remediado, promoção 10365 inalterada, FASE D real de rollout não iniciada**.
+
 ## v13 — 18/09/2026
 
 FASE D-PRE (`fix/preprod-static-hardening`, sobre `main` já com `feat/write-guards-readback` mergeada via PR #3, `5d94b9b`): hardening estático pré-produção a partir de achados de auditoria independente do Tech Lead direto sobre o repositório público — FASE D.0 (rollout real) ficou BLOCKED por SSH/credenciais, então a revisão passou a ser estática. Escopo só código+testes+documentação, sem merge/deploy/migration em produção/escrita real em Wake/CISS. Ver detalhes em `STATUS.md` (seção "FASE D-PRE").

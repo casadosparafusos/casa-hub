@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { href: '/precos', label: 'Sinc. Preços', disabled: false },
   { href: '/estoque', label: 'Sinc. Estoque', disabled: false },
   { href: '/produtos', label: 'Produtos', disabled: false },
+  { href: '/embalagens', label: 'Embalagens KG/MT', disabled: false },
   { href: '/caixas', label: 'Caixas', disabled: true },
   { href: '/historico', label: 'Histórico', disabled: false },
   { href: '/usuarios', label: 'Usuários', disabled: false },

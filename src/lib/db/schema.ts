@@ -140,6 +140,37 @@ export const productSaleUnitConfig = sqliteTable(
 )
 
 /**
+ * Historico/auditoria de mudancas em product_sale_unit_config (FASE E, §12).
+ * A tabela de config so guarda o estado ATUAL (updated_by/updated_at) -- esta
+ * grava cada evento (criacao/atualizacao/desativacao/reativacao) separado,
+ * incluindo os valores antigo/novo e a origem (manual na tela ou import por
+ * planilha). NAO reaproveita `imports` (aquela e especifica do CSV de
+ * whitelist, semantica diferente) e NUNCA guarda o arquivo inteiro -- so o
+ * nome, quando vier de import.
+ */
+export const productSaleUnitConfigEvents = sqliteTable(
+  'product_sale_unit_config_events',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    managedProductId: integer('managed_product_id')
+      .notNull()
+      .references(() => managedProducts.id),
+    action: text('action', { enum: ['CREATE', 'UPDATE', 'DEACTIVATE', 'REACTIVATE'] }).notNull(),
+    sourceUnit: text('source_unit', { enum: ['KG', 'MT'] }).notNull(),
+    oldQuantityPerSaleUnit: real('old_quantity_per_sale_unit'),
+    newQuantityPerSaleUnit: real('new_quantity_per_sale_unit'),
+    actor: text('actor').notNull(),
+    origin: text('origin', { enum: ['MANUAL', 'IMPORT'] }).notNull(),
+    filename: text('filename'),
+    createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => ({
+    managedProductIdIdx: index('product_sale_unit_config_events_managed_product_id_idx').on(t.managedProductId),
+    createdAtIdx: index('product_sale_unit_config_events_created_at_idx').on(t.createdAt),
+  }),
+)
+
+/**
  * Uma linha por execucao do motor de sincronizacao -- manual (web) ou
  * agendada (worker), incluindo a reconciliacao diaria. dry_run=1 nunca
  * escreve no Wake, soh calcula e registra o que faria.
