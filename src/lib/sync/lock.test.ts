@@ -69,13 +69,26 @@ async function seedLockRow(resource: string, lockedBy: string, expiresAtIso: str
 
 const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString()
 const PAST = new Date(Date.now() - 60 * 1000).toISOString()
+const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+function tokenPattern(lockedBy: string, pid = process.pid): RegExp {
+  return new RegExp(`^${lockedBy}#pid${pid}#lock:${UUID_RE}$`)
+}
 
 describe('acquireLock/releaseLock -- basico', () => {
-  it('adquire um recurso livre e devolve um token contendo o pid do processo atual', async () => {
+  it('adquire um recurso livre e devolve um token contendo o pid do processo atual e um nonce unico', async () => {
     const token = await lock.acquireLock('preco', 'web:tester')
-    expect(token).toBe(`web:tester#pid${process.pid}`)
+    expect(token).toMatch(tokenPattern('web:tester'))
     const row = await readLockRow('preco')
     expect(row?.lockedBy).toBe(token)
+  })
+
+  it('duas aquisicoes seguidas do mesmo processo com o mesmo lockedBy geram tokens diferentes (nonce por aquisicao)', async () => {
+    const tokenA = await lock.acquireLock('preco', 'web:tester')
+    await lock.releaseLock('preco', tokenA)
+    const tokenB = await lock.acquireLock('preco', 'web:tester')
+    expect(tokenA).not.toBe(tokenB)
+    expect(tokenA).toMatch(tokenPattern('web:tester'))
+    expect(tokenB).toMatch(tokenPattern('web:tester'))
   })
 
   it('releaseLock com o token certo libera o recurso', async () => {
@@ -112,7 +125,7 @@ describe('acquireLock -- corrida de dono (FASE D-PRE §7)', () => {
     vi.spyOn(process, 'kill').mockReturnValue(true) // dono anterior "vivo" -- irrelevante, TTL ja expirou
 
     const tokenB = await lock.acquireLock('estoque', 'ownerB')
-    expect(tokenB).toBe(`ownerB#pid${process.pid}`)
+    expect(tokenB).toMatch(tokenPattern('ownerB'))
     const row = await readLockRow('estoque')
     expect(row?.lockedBy).toBe(tokenB)
   })
@@ -125,7 +138,7 @@ describe('acquireLock -- corrida de dono (FASE D-PRE §7)', () => {
     })
 
     const tokenB = await lock.acquireLock('estoque', 'ownerB')
-    expect(tokenB).toBe(`ownerB#pid${process.pid}`)
+    expect(tokenB).toMatch(tokenPattern('ownerB'))
   })
 
   it('cenario central do §7: apos o lock passar a B (roubo), o release do dono original A vira no-op e B continua dono', async () => {
@@ -146,6 +159,30 @@ describe('acquireLock -- corrida de dono (FASE D-PRE §7)', () => {
     expect(row?.expiresAt).not.toBeNull()
 
     // So o release de B (o dono de fato) libera o recurso.
+    await lock.releaseLock('estoque', tokenB)
+    const released = await readLockRow('estoque')
+    expect(released?.lockedBy).toBeNull()
+  })
+
+  it('revisao Tech Lead PR #4: mesmo processo + mesmo lockedBy (execucao A e B do mesmo worker) -- nonce impede que o release tardio de A libere o lock de B', async () => {
+    const lockedBy = 'scheduled:worker' // mesmo processo, mesmo lockedBy nas duas aquisicoes
+    const tokenA = await lock.acquireLock('estoque', lockedBy)
+    // Simula A passando do backstop de TTL sem nunca chamar releaseLock.
+    await db.update(schema.jobLocks).set({ expiresAt: PAST }).where(eq(schema.jobLocks.resource, 'estoque')).run()
+
+    const tokenB = await lock.acquireLock('estoque', lockedBy)
+    // Antes do nonce: mesmo processo + mesmo lockedBy => mesmo `${lockedBy}#pid${pid}` => tokenA === tokenB.
+    expect(tokenA).not.toBe(tokenB)
+    expect(tokenA).toMatch(tokenPattern(lockedBy))
+    expect(tokenB).toMatch(tokenPattern(lockedBy))
+
+    // Release tardio de A (token antigo) deve ser no-op -- B continua dono.
+    await lock.releaseLock('estoque', tokenA)
+    const row = await readLockRow('estoque')
+    expect(row?.lockedBy).toBe(tokenB)
+    expect(row?.expiresAt).not.toBeNull()
+
+    // So o release de B (com o token certo) libera o recurso.
     await lock.releaseLock('estoque', tokenB)
     const released = await readLockRow('estoque')
     expect(released?.lockedBy).toBeNull()

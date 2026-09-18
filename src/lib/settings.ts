@@ -21,12 +21,20 @@ export type { SecretKey }
 //      estiver ausente.
 // -----------------------------------------------------------------------
 
+// BUG CORRIGIDO (revisão Tech Lead do PR #4, 2026-09-18): CSV_IDENTIFIER_TYPE
+// foi auditado (grep por consumidores em src/) e nao tem NENHUM -- o
+// `tipoIdentificador` de fato enviado ao Wake e sempre um literal hardcoded
+// em cada chamada do client (`'Sku'`/`'ProdutoVarianteId'`/`'sku'`, ver
+// src/lib/wake/client.ts), nunca lido desta setting. Bloquear a sync real
+// esperando confirmacao de uma chave que nenhum codigo le e um gate morto --
+// removida da lista obrigatoria. Qualquer valor ja persistido no banco por
+// alguem continua la (nunca apagamos linha de settings), so deixou de
+// aparecer na tela/API como pendencia.
 export const REQUIRED_UNCONFIRMED_KEYS = [
   'WAKE_CD_ID',
-  'WAKE_STOCK_CONTROL_MODE', // 'fstore' | 'erp' -- ver docs/WAKE-API-CONTRATOS.md
+  'WAKE_STOCK_CONTROL_MODE', // 'fstore' | 'erp' -- ver docs/WAKE-API-CONTRATOS.md; validado por SETTING_ENUM_RANGES abaixo
   'WAKE_PRICE_TABLE_ID',
   'WAKE_PROMOTION_ID',
-  'CSV_IDENTIFIER_TYPE', // 'sku' | 'id interno' -- tipoIdentificador da API Wake
 ] as const
 
 export type RequiredUnconfirmedKey = (typeof REQUIRED_UNCONFIRMED_KEYS)[number]
@@ -101,11 +109,32 @@ export const SETTING_RANGES: Record<string, SettingSpec> = {
   WAKE_PROMOTION_ID: { kind: 'integer', exclusiveMin: 0 },
 }
 
+// BUG CORRIGIDO (revisão Tech Lead do PR #4, 2026-09-18): WAKE_STOCK_CONTROL_MODE
+// nunca teve validacao nenhuma alem de "string nao-vazia" -- qualquer valor
+// (typo, "Fstore" com maiuscula, "sim") passava pelo PUT e ficava persistido,
+// e o gate de REQUIRED_UNCONFIRMED so checava presenca, nunca formato. Como
+// o proprio nome documenta que o valor so pode ser 'fstore' ou 'erp' (ver
+// docs/WAKE-API-CONTRATOS.md), agora isso e uma faixa de valores aceitos de
+// verdade -- validado na escrita (400 se invalido) e no gate de
+// REQUIRED_UNCONFIRMED (persistido-mas-invalido bloqueia igual a ausente).
+export const SETTING_ENUM_RANGES: Record<string, readonly string[]> = {
+  WAKE_STOCK_CONTROL_MODE: ['fstore', 'erp'],
+}
+
 /** Lanca SettingValidationError se `raw` (valor JA CONFIRMADO presente) nao respeitar a faixa de `key`. */
 export function validateSettingValue(key: string, raw: string): number {
   const spec = SETTING_RANGES[key]
   if (!spec) throw new SettingValidationError(key, `Chave '${key}' nao tem faixa de validação definida`)
-  const n = Number(raw)
+  // BUG CORRIGIDO (revisão Tech Lead do PR #4, 2026-09-18): um valor com
+  // espaco em branco ao redor (ex: "10 " colado de uma planilha) passava
+  // batendo em Number()/Number.isInteger() sem erro (`Number(" 10 ")` ===
+  // 10), mas se o espaco viesse sozinho ou so com tabs (`"  "`), a checagem
+  // de faixa abaixo podia aceitar um valor que nunca foi de fato confirmado
+  // por ninguem. Trim explicito antes do parse -- e vazio-apos-trim agora e
+  // erro explicito, nunca um NaN silencioso.
+  const trimmed = raw.trim()
+  if (trimmed === '') throw new SettingValidationError(key, `'${key}' nao pode ser vazio ou conter só espaços`)
+  const n = Number(trimmed)
   if (!Number.isFinite(n)) throw new SettingValidationError(key, `'${key}' precisa ser um número válido, recebido: ${JSON.stringify(raw)}`)
   if (spec.kind === 'integer' && !Number.isInteger(n)) {
     throw new SettingValidationError(key, `'${key}' precisa ser um número inteiro, recebido: ${raw}`)
@@ -121,6 +150,26 @@ export function validateSettingValue(key: string, raw: string): number {
 export function isValidSettingValue(key: string, raw: string): boolean {
   try {
     validateSettingValue(key, raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Lanca SettingValidationError se `raw` nao for um dos valores aceitos de `key` (case-insensitive). Devolve a forma canonica (lowercase, sem espacos). */
+export function validateEnumSettingValue(key: string, raw: string): string {
+  const spec = SETTING_ENUM_RANGES[key]
+  if (!spec) throw new SettingValidationError(key, `Chave '${key}' nao tem lista de valores aceitos definida`)
+  const normalized = raw.trim().toLowerCase()
+  if (!spec.includes(normalized)) {
+    throw new SettingValidationError(key, `'${key}' precisa ser um destes valores: ${spec.join(', ')} -- recebido: ${JSON.stringify(raw)}`)
+  }
+  return normalized
+}
+
+export function isValidEnumSettingValue(key: string, raw: string): boolean {
+  try {
+    validateEnumSettingValue(key, raw)
     return true
   } catch {
     return false
@@ -207,6 +256,11 @@ export async function checkRequiredUnconfirmed(): Promise<{
       // real do mesmo jeito que ausente -- reaproveita `missing`, ja usado
       // pelo gate em src/lib/sync/engine.ts (runSyncLocked), em vez de criar
       // um segundo gate paralelo que alguem podia esquecer de checar.
+      missing.push(key)
+    } else if (key in SETTING_ENUM_RANGES && !isValidEnumSettingValue(key, v)) {
+      // Mesmo raciocinio do bloco acima, agora pro unico membro textual desta
+      // lista (WAKE_STOCK_CONTROL_MODE): presente-mas-fora-de-'fstore'|'erp'
+      // bloqueia a sync real igual a ausente.
       missing.push(key)
     }
   }

@@ -170,31 +170,29 @@ describe('getCommercialPolicyConfig/rules/stockSource -- as 4 categorias exigida
   })
 })
 
-describe('checkRequiredUnconfirmed -- WAKE_CD_ID/WAKE_PRICE_TABLE_ID/WAKE_PROMOTION_ID invalidos bloqueiam igual a ausentes (FASE D-PRE §4)', () => {
-  it('AUSENTE: os 5 REQUIRED_UNCONFIRMED_KEYS sem valor -- todos em `missing`', async () => {
+describe('checkRequiredUnconfirmed -- WAKE_CD_ID/WAKE_STOCK_CONTROL_MODE/WAKE_PRICE_TABLE_ID/WAKE_PROMOTION_ID invalidos bloqueiam igual a ausentes (FASE D-PRE §4 + revisao Tech Lead PR #4 fix #3)', () => {
+  it('AUSENTE: os 4 REQUIRED_UNCONFIRMED_KEYS sem valor -- todos em `missing`', async () => {
     const { missing, values } = await settings.checkRequiredUnconfirmed()
     expect(missing.sort()).toEqual([...settings.REQUIRED_UNCONFIRMED_KEYS].sort())
     for (const key of settings.REQUIRED_UNCONFIRMED_KEYS) expect(values[key]).toBeNull()
   })
 
-  it('VALIDO: os 5 confirmados com valores validos -- `missing` fica vazio', async () => {
+  it('VALIDO: os 4 confirmados com valores validos -- `missing` fica vazio', async () => {
     await settings.setSetting('WAKE_CD_ID', '25')
     await settings.setSetting('WAKE_STOCK_CONTROL_MODE', 'fstore')
     await settings.setSetting('WAKE_PRICE_TABLE_ID', '74')
     await settings.setSetting('WAKE_PROMOTION_ID', '10365')
-    await settings.setSetting('CSV_IDENTIFIER_TYPE', 'sku')
 
     const { missing, values } = await settings.checkRequiredUnconfirmed()
     expect(missing).toEqual([])
     expect(values.WAKE_CD_ID).toBe('25')
   })
 
-  it('PRESENTE-E-INVALIDO: WAKE_CD_ID="abc" -- bloqueia a sync real igual a ausente, mesmo com os outros 4 validos', async () => {
+  it('PRESENTE-E-INVALIDO: WAKE_CD_ID="abc" -- bloqueia a sync real igual a ausente, mesmo com os outros 3 validos', async () => {
     await settings.setSetting('WAKE_CD_ID', 'abc')
     await settings.setSetting('WAKE_STOCK_CONTROL_MODE', 'fstore')
     await settings.setSetting('WAKE_PRICE_TABLE_ID', '74')
     await settings.setSetting('WAKE_PROMOTION_ID', '10365')
-    await settings.setSetting('CSV_IDENTIFIER_TYPE', 'sku')
 
     const { missing, values } = await settings.checkRequiredUnconfirmed()
     expect(missing).toEqual(['WAKE_CD_ID'])
@@ -208,20 +206,64 @@ describe('checkRequiredUnconfirmed -- WAKE_CD_ID/WAKE_PRICE_TABLE_ID/WAKE_PROMOT
     await settings.setSetting('WAKE_STOCK_CONTROL_MODE', 'fstore')
     await settings.setSetting('WAKE_PRICE_TABLE_ID', '-74')
     await settings.setSetting('WAKE_PROMOTION_ID', '10365')
-    await settings.setSetting('CSV_IDENTIFIER_TYPE', 'sku')
 
     const { missing } = await settings.checkRequiredUnconfirmed()
     expect(missing).toEqual(['WAKE_PRICE_TABLE_ID'])
   })
 
-  it('WAKE_STOCK_CONTROL_MODE/CSV_IDENTIFIER_TYPE nao tem faixa numerica -- qualquer string nao-vazia passa (fora de escopo do §4)', async () => {
+  it('PRESENTE-E-INVALIDO: WAKE_STOCK_CONTROL_MODE="qualquer-coisa" (fora de fstore|erp) bloqueia igual a ausente (revisao Tech Lead PR #4, fix #3)', async () => {
     await settings.setSetting('WAKE_CD_ID', '25')
     await settings.setSetting('WAKE_STOCK_CONTROL_MODE', 'qualquer-coisa')
     await settings.setSetting('WAKE_PRICE_TABLE_ID', '74')
     await settings.setSetting('WAKE_PROMOTION_ID', '10365')
-    await settings.setSetting('CSV_IDENTIFIER_TYPE', 'qualquer-coisa')
+
+    const { missing } = await settings.checkRequiredUnconfirmed()
+    expect(missing).toEqual(['WAKE_STOCK_CONTROL_MODE'])
+  })
+
+  it('VALIDO: WAKE_STOCK_CONTROL_MODE="ERP" (maiusculo) -- canonicaliza e nao bloqueia', async () => {
+    await settings.setSetting('WAKE_CD_ID', '25')
+    await settings.setSetting('WAKE_STOCK_CONTROL_MODE', 'ERP')
+    await settings.setSetting('WAKE_PRICE_TABLE_ID', '74')
+    await settings.setSetting('WAKE_PROMOTION_ID', '10365')
 
     const { missing } = await settings.checkRequiredUnconfirmed()
     expect(missing).toEqual([])
+  })
+})
+
+describe('validateEnumSettingValue/isValidEnumSettingValue -- WAKE_STOCK_CONTROL_MODE (revisao Tech Lead PR #4, fix #3)', () => {
+  it.each([
+    ['fstore', 'fstore'],
+    ['erp', 'erp'],
+    ['FSTORE', 'fstore'],
+    ['Erp', 'erp'],
+    [' erp ', 'erp'],
+  ])('WAKE_STOCK_CONTROL_MODE: %s -> canonico %s', (raw, expected) => {
+    expect(settings.validateEnumSettingValue('WAKE_STOCK_CONTROL_MODE', raw)).toBe(expected)
+    expect(settings.isValidEnumSettingValue('WAKE_STOCK_CONTROL_MODE', raw)).toBe(true)
+  })
+
+  it.each(['fstor', 'erp2', 'qualquer-coisa', ''])('WAKE_STOCK_CONTROL_MODE: %s invalido -- lanca SettingValidationError', (raw) => {
+    expect(() => settings.validateEnumSettingValue('WAKE_STOCK_CONTROL_MODE', raw)).toThrow(settings.SettingValidationError)
+    expect(settings.isValidEnumSettingValue('WAKE_STOCK_CONTROL_MODE', raw)).toBe(false)
+  })
+
+  it('chave sem lista de valores aceitos definida -- lanca SettingValidationError', () => {
+    expect(() => settings.validateEnumSettingValue('WAKE_CD_ID', 'qualquer')).toThrow(settings.SettingValidationError)
+  })
+})
+
+describe('validateSettingValue -- espacos em branco (revisao Tech Lead PR #4, fix #5)', () => {
+  it.each([
+    ['STOCK_PERCENT', ' 10 ', 10],
+    ['STOCK_PERCENT', '\t10\n', 10],
+    ['WAKE_CD_ID', '  25  ', 25],
+  ])('%s: %j com espacos -- trima antes de validar/parsear -> %d', (key, raw, expected) => {
+    expect(settings.validateSettingValue(key, raw)).toBe(expected)
+  })
+
+  it.each(['   ', '\t', '\n'])('STOCK_PERCENT: %j (so espacos) -- lanca SettingValidationError, nunca vira 0/NaN silencioso', (raw) => {
+    expect(() => settings.validateSettingValue('STOCK_PERCENT', raw)).toThrow(settings.SettingValidationError)
   })
 })

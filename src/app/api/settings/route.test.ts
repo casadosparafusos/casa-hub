@@ -148,14 +148,42 @@ describe('PUT /api/settings -- FASE D-PRE §4 (valida faixa antes de persistir)'
     expect(await settingsLib.getSetting('STOCK_PERCENT')).toBe('15')
   })
 
-  it('chave sem faixa numerica (ex: WAKE_STOCK_CONTROL_MODE) -- nao passa por validateSettingValue, so pela whitelist', async () => {
-    const res = await PUT(fakePutRequest({ key: 'WAKE_STOCK_CONTROL_MODE', value: 'fstore' }))
+  it('valido (com espacos) -> 200 e persiste o valor trimado (revisao Tech Lead PR #4, fix #5)', async () => {
+    const res = await PUT(fakePutRequest({ key: 'STOCK_PERCENT', value: ' 15 ' }))
     expect(res.status).toBe(200)
-    expect(await settingsLib.getSetting('WAKE_STOCK_CONTROL_MODE')).toBe('fstore')
+    expect(await settingsLib.getSetting('STOCK_PERCENT')).toBe('15')
+  })
+
+  it('invalido (so espacos) -> 400, nada persistido (revisao Tech Lead PR #4, fix #5)', async () => {
+    const res = await PUT(fakePutRequest({ key: 'STOCK_PERCENT', value: '   ' }))
+    expect(res.status).toBe(400)
+    expect(await settingsLib.getSetting('STOCK_PERCENT')).toBeNull()
   })
 
   it('chave desconhecida -> 400 (whitelist, comportamento pre-existente preservado)', async () => {
     const res = await PUT(fakePutRequest({ key: 'CHAVE_INEXISTENTE', value: 'x' }))
     expect(res.status).toBe(400)
+  })
+})
+
+describe('PUT /api/settings -- WAKE_STOCK_CONTROL_MODE (revisao Tech Lead PR #4, fix #3: enum fstore|erp)', () => {
+  it('valido (fstore) -> 200, persiste exatamente o valor canonico', async () => {
+    const res = await PUT(fakePutRequest({ key: 'WAKE_STOCK_CONTROL_MODE', value: 'fstore' }))
+    expect(res.status).toBe(200)
+    expect(await settingsLib.getSetting('WAKE_STOCK_CONTROL_MODE')).toBe('fstore')
+  })
+
+  it('valido (ERP maiusculo, com espacos) -> 200, persiste canonicalizado (trim + lowercase)', async () => {
+    const res = await PUT(fakePutRequest({ key: 'WAKE_STOCK_CONTROL_MODE', value: ' ERP ' }))
+    expect(res.status).toBe(200)
+    expect(await settingsLib.getSetting('WAKE_STOCK_CONTROL_MODE')).toBe('erp')
+  })
+
+  it('invalido (fora de fstore|erp) -> 400, nada persistido', async () => {
+    const res = await PUT(fakePutRequest({ key: 'WAKE_STOCK_CONTROL_MODE', value: 'qualquer-coisa' }))
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toMatch(/WAKE_STOCK_CONTROL_MODE/)
+    expect(await settingsLib.getSetting('WAKE_STOCK_CONTROL_MODE')).toBeNull()
   })
 })

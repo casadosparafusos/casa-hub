@@ -16,6 +16,7 @@ import {
   updateWakePriceTableProducts,
   getWakeProductBySku,
   readWakeStockByVariantId,
+  readWakePriceTableByVariantId,
   WakeClientError,
   type WakePriceUpdateItem,
   type WakeStockUpdateItem,
@@ -587,24 +588,70 @@ async function syncPrices(
     // FASE C §9: updateWakePriceTableProducts/addWakePriceTableProducts nao
     // devolvem ACK por item (void, ver src/lib/wake/client.ts) -- diferente
     // do preco unitario (GET /produtos/{sku}) e do estoque (ACK do proprio
-    // PUT), o unico jeito de confirmar aqui e reler a Tabela de Preco
-    // inteira, igual fetchPriceTableEntries() ja faz no topo desta funcao
-    // pra montar o diff. Sem isto o bug historico do SKU 7648 (escrita
-    // aceita sem erro, valor no Wake nunca mudou) ficava sem protecao
-    // nenhuma neste caminho.
-    if (writtenItems.length > 0) {
-      const verifyEntries = await fetchPriceTableEntries(priceTableId)
-      for (const b of writtenItems) {
-        changed++
-        const entry = verifyEntries.get(b.product.wakeSku)
-        const verified = entry !== undefined && entry.precoPor === b.precoPor && entry.precoDe === b.precoDe
+    // PUT), o unico jeito de confirmar e reler. Sem isto o bug historico do
+    // SKU 7648 (escrita aceita sem erro, valor no Wake nunca mudou) ficava
+    // sem protecao nenhuma neste caminho.
+    //
+    // FIX (revisao Tech Lead do PR #4, itens #2 e #4, 2026-09-18): a versao
+    // anterior fazia uma SEGUNDA releitura paginada da Tabela 74 inteira
+    // (fetchPriceTableEntries, igual a leitura do diff no topo da funcao) e
+    // essa chamada nao estava em try/catch -- uma falha de rede/429/5xx na
+    // releitura final derrubava a run inteira (throw sem catch) e todos os
+    // writtenItems ficavam SEM status nenhum (nem 'applied' nem 'failed'),
+    // quebrando a trilha de auditoria por produto exigida pela FASE C.
+    // Agora cada item escrito e reconferido por leitura DIRECIONADA
+    // (readWakePriceTableByVariantId(), src/lib/wake/client.ts -- GET
+    // /produtos/{variantId}?tipoIdentificador=ProdutoVarianteId&
+    // camposAdicionais=TabelaPreco), serializada com o mesmo pacing do
+    // preco unitario acima (WAKE_VERIFY_DELAY_MS), preservando a regra
+    // FASE C: SENT -> READ BACK -> VERIFIED | MISMATCH | FAILED. Erro na
+    // leitura de UM item nunca derruba os demais (try/catch por item) e
+    // nunca vira 'mismatch' -- so 'failed', com trilha de auditoria
+    // completa preservada pra cada produto. Formula de requests por run:
+    // 1 leitura paginada inicial (P GETs, pro diff) + N leituras
+    // direcionadas serializadas (1 GET por item escrito) -- nunca mais um
+    // segundo full-scan (P GETs) igual a versao anterior.
+    for (const b of writtenItems) {
+      changed++
+      const variantId = Number(b.product.wakeProductVariantId)
+      let entry: { precoDe: number; precoPor: number } | null = null
+      let readError: string | null = null
+      if (!Number.isFinite(variantId)) {
+        readError = `wakeProductVariantId invalido (${b.product.wakeProductVariantId})`
+      } else {
+        try {
+          entry = await readWakePriceTableByVariantId(variantId, priceTableId)
+        } catch (err) {
+          readError = err instanceof WakeClientError ? err.message : String(err)
+        }
+      }
+
+      if (readError !== null) {
+        // Falha na propria releitura (rede/429/5xx/timeout/variantId invalido)
+        // -- nunca 'mismatch': a escrita pode ter sido aplicada de verdade,
+        // so nao foi possivel confirmar. lastApplied* nao existe pra
+        // special_price (o diff compara contra a Tabela 74 ao vivo, nao
+        // contra estado local -- ver tableEntries no topo da funcao), entao
+        // nao ha nada a "nao avancar" aqui alem de nao marcar 'applied'.
+        failed++
+        await logItem({
+          syncRunId,
+          managedProductId: b.product.id,
+          field: 'special_price',
+          targetOldValue: null,
+          targetNewValue: b.precoPor,
+          status: 'failed',
+          errorMessage: `Falha ao reconferir a Tabela de Preço apos a escrita -- ${readError}`,
+        })
+      } else {
+        const verified = entry !== null && entry.precoPor === b.precoPor && entry.precoDe === b.precoDe
         if (verified) {
           applied++
           await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
         } else {
           failed++
           const detail =
-            entry === undefined
+            entry === null
               ? 'SKU nao encontrado na Tabela de Preco apos a escrita'
               : `Tabela de Preco mostra precoPor=${entry.precoPor}/precoDe=${entry.precoDe} (esperado precoPor=${b.precoPor}/precoDe=${b.precoDe})`
           await logItem({
@@ -613,11 +660,12 @@ async function syncPrices(
             field: 'special_price',
             targetOldValue: null,
             targetNewValue: b.precoPor,
-            status: entry === undefined ? 'failed' : 'mismatch',
+            status: entry === null ? 'failed' : 'mismatch',
             errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia da Tabela de Preco nao confirmou -- ${detail}`,
           })
         }
       }
+      await sleep(WAKE_VERIFY_DELAY_MS)
     }
   } else if (dryRun && priceTableId !== null && toApplyTablePrice.length > 0) {
     // FASE D-PRE §3: dry-run agora tambem mostra o plano da Tabela 74 (a

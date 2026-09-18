@@ -237,10 +237,11 @@ export const imports = sqliteTable('imports', {
 /**
  * Configuracao chave/valor -- inclui os valores que a especificacao exige
  * descobrir (nunca inventar) antes de ligar a sincronizacao real:
- * WAKE_CD_ID, WAKE_STOCK_CONTROL_MODE, WAKE_PRICE_TABLE_ID,
- * WAKE_PROMOTION_ID, CISS_STOCK_ENTERPRISE, CISS_STOCK_LOCATION,
- * CSV_IDENTIFIER_TYPE, UNIT_PRICE_MARKUP_PERCENT, WHOLESALE_MIN_QTY,
- * STOCK_PERCENT. Ver src/lib/settings.ts pro contrato de leitura/default.
+ * WAKE_CD_ID, WAKE_STOCK_CONTROL_MODE ('fstore'|'erp', validado por
+ * SETTING_ENUM_RANGES), WAKE_PRICE_TABLE_ID, WAKE_PROMOTION_ID,
+ * CISS_STOCK_ENTERPRISE, CISS_STOCK_LOCATION, UNIT_PRICE_MARKUP_PERCENT,
+ * WHOLESALE_MIN_QTY, STOCK_PERCENT. Ver src/lib/settings.ts pro contrato de
+ * leitura/default.
  */
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),

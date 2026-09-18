@@ -509,3 +509,72 @@ export async function readWakeStockByVariantId(variantId: number, cdId: number):
   if (!entry || typeof entry.estoqueFisico !== 'number' || !Number.isFinite(entry.estoqueFisico)) return null
   return entry.estoqueFisico
 }
+
+/** Uma entrada de `tabelasPreco[]` no corpo de GET /produtos/{identificador}?camposAdicionais=TabelaPreco. */
+interface WakeProductTabelaPrecoEntry {
+  tabelaPrecoId?: number
+  nome?: string
+  precoDe?: number
+  precoPor?: number
+  [key: string]: unknown
+}
+
+interface WakeProductWithTabelasPrecoResponse {
+  tabelasPreco?: WakeProductTabelaPrecoEntry[]
+  [key: string]: unknown
+}
+
+/**
+ * GET /produtos/{identificador}?tipoIdentificador=ProdutoVarianteId&camposAdicionais=TabelaPreco --
+ * leitura pontual direcionada de uma Tabela de Preco especifica pra 1
+ * produto, criada na revisao do Tech Lead do PR #4 (fix #4, 2026-09-18)
+ * pra substituir a segunda releitura paginada da Tabela 74 inteira em
+ * syncPrices() (src/lib/sync/engine.ts). Endpoint e schema confirmados na
+ * doc oficial Wake:
+ *   - https://wakecommerce.readme.io/reference/retorna-um-produto-buscando-pelo-seu-identificador
+ *   - https://wakecommerce.readme.io/docs/consultando-um-produto-especifico
+ * `camposAdicionais=TabelaPreco` inclui `tabelasPreco[]` no corpo, cada
+ * entrada com `tabelaPrecoId`/`precoDe`/`precoPor`. Reaproveita
+ * wakeRequest() -- mesmo auth/retry/backoff/timeout/rate-limit/error-
+ * handling de todo o cliente Wake, nenhum cliente HTTP paralelo (mesmo
+ * padrao de readWakeStockByVariantId() acima).
+ *
+ * Selecao da tabela: estritamente `tabelasPreco.find(t => t.tabelaPrecoId
+ * === tableId)`. NUNCA usa outra tabela como fallback, mesmo que so exista
+ * uma entrada na lista -- um produto pode estar associado a mais de uma
+ * Tabela de Preco.
+ *
+ * Retorna `null` pra qualquer caso NAO verificavel, nunca aceitando
+ * silenciosamente um valor incerto:
+ *   - 404 (produto/variante nao encontrado);
+ *   - campo `tabelasPreco` ausente/nao-array;
+ *   - nenhuma entrada da lista com `tabelaPrecoId === tableId`;
+ *   - `precoDe`/`precoPor` da entrada ausente, nao-numerico ou nao-finito.
+ * Erro de rede/protocolo (WakeClientError transiente ou permanente que nao
+ * seja 404) propaga pro chamador -- quem chama trata esse throw como
+ * FAILED, nunca como MISMATCH (mesmo criterio de readWakeStockByVariantId).
+ *
+ * Chamador responsavel por serializar/pacear as chamadas (ex.:
+ * WAKE_VERIFY_DELAY_MS em engine.ts) -- esta funcao nao faz rate limiting
+ * proprio, so uma chamada por invocacao.
+ */
+export async function readWakePriceTableByVariantId(variantId: number, tableId: number): Promise<{ precoDe: number; precoPor: number } | null> {
+  let response: WakeProductWithTabelasPrecoResponse
+  try {
+    response = await wakeRequest<WakeProductWithTabelasPrecoResponse>('GET', `/produtos/${variantId}`, {
+      params: { tipoIdentificador: 'ProdutoVarianteId', camposAdicionais: 'TabelaPreco' },
+    })
+  } catch (err) {
+    if (err instanceof WakePermanentError && /\b404\b/.test(err.message)) return null
+    throw err
+  }
+
+  const list = response?.tabelasPreco
+  if (!Array.isArray(list)) return null
+
+  const entry = list.find((t) => t.tabelaPrecoId === tableId)
+  if (!entry || typeof entry.precoDe !== 'number' || !Number.isFinite(entry.precoDe) || typeof entry.precoPor !== 'number' || !Number.isFinite(entry.precoPor)) {
+    return null
+  }
+  return { precoDe: entry.precoDe, precoPor: entry.precoPor }
+}

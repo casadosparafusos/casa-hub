@@ -10,8 +10,12 @@ const REQUIRED_FIELDS = [
   { key: 'WAKE_STOCK_CONTROL_MODE', label: "'fstore' ou 'erp'", help: '"Controlar estoque pela FStore" ON = fstore (não enviar baixa manual); OFF = erp (enviar baixa explícita). Checar no admin do Wake.' },
   { key: 'WAKE_PRICE_TABLE_ID', label: 'ID da Tabela de Preço "PARAFUSOS - PREÇO CENTO ERP"', help: 'Criar a tabela no admin do Wake primeiro, depois colar o ID aqui.' },
   { key: 'WAKE_PROMOTION_ID', label: 'ID da Promoção "PREÇO CENTO - FIXADORES"', help: 'Não há endpoint confirmado de criação de promoção via API -- criar no admin do Wake.' },
-  { key: 'CSV_IDENTIFIER_TYPE', label: "'sku' ou 'id interno'", help: 'Tipo de identificador enviado nas chamadas de escrita do Wake (tipoIdentificador).' },
 ]
+// CSV_IDENTIFIER_TYPE removida desta lista (revisao Tech Lead PR #4, fix #3):
+// auditoria (grep em src/) confirmou que nenhum consumidor le essa setting --
+// o tipoIdentificador enviado ao Wake e sempre um literal hardcoded por
+// chamada em src/lib/wake/client.ts. Ver comentario equivalente em
+// src/lib/settings.ts (REQUIRED_UNCONFIRMED_KEYS).
 
 const RULE_FIELDS = [
   { key: 'UNIT_PRICE_MARKUP_PERCENT', label: String(RULE_DEFAULTS.UNIT_PRICE_MARKUP_PERCENT), help: 'Markup percentual sobre o preço bruto do ERP para o preço unitário no Wake.' },
