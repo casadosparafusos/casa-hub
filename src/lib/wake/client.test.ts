@@ -128,6 +128,44 @@ describe('wakeRequest -- retry/backoff/circuito (FASE C §11)', () => {
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 
+  // FASE D-PRE §6 (achado independente do Tech Lead): fetch() rejeita com
+  // TypeError (nao AbortError) numa falha de rede REAL -- DNS, conexao
+  // recusada, socket caindo no meio. Antes disso, esse catch reconhecia so
+  // WakeClientError (repropaga) e AbortError (retry) -- um TypeError
+  // generico caia no `throw err` final, subindo sem NENHUMA tentativa nova,
+  // mesmo sendo o tipo de falha mais obvio pra retentar.
+  it('falha de rede (TypeError) seguida de sucesso: retentativa funciona', async () => {
+    const { getWakePriceTables } = await import('./client')
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(fakeResponse(200, JSON.stringify([])))
+
+    const promise = getWakePriceTables()
+    await vi.runAllTimersAsync()
+    const result = await promise
+
+    expect(result).toEqual([])
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('falha de rede (TypeError) persistente: esgota MAX_RETRIES=2 tentativas e lanca WakeTransientError', async () => {
+    const { getWakePriceTables, WakeTransientError } = await import('./client')
+    vi.mocked(fetch).mockRejectedValue(new TypeError('fetch failed'))
+
+    const promise = getWakePriceTables()
+    const assertion = expect(promise).rejects.toThrow(WakeTransientError)
+    await vi.runAllTimersAsync()
+    await assertion
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('erro permanente (4xx) nunca retenta, mesmo quando pareceria uma falha transiente', async () => {
+    const { getWakePriceTables, WakePermanentError } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(401, 'nao autorizado'))
+
+    await expect(getWakePriceTables()).rejects.toThrow(WakePermanentError)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
   it('circuito abre apos 5 throttles consecutivos: recusa sem chamar fetch, mesmo em rota nova', async () => {
     const { getWakePriceTables, getWakePhysicalStores, WakeTransientError, WakePermanentError } = await import('./client')
     vi.mocked(fetch).mockResolvedValue(fakeResponse(429, 'throttle'))
@@ -297,5 +335,127 @@ describe('readWakeStockByVariantId (FASE C.2 §2/§3/§4/§6 -- endpoint oficial
 
     vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, stockResponse({ cds: [{ centroDistribuicaoId: 25, estoqueFisico: '42' }] })))
     expect(await readWakeStockByVariantId(281145, 25)).toBeNull()
+  })
+})
+
+// revisao Tech Lead PR #4, revisao final #2, item 3: readWakePriceTableByVariantId()
+// nao tinha teste direto -- engine.test.ts so mocka '../wake/client' e nunca
+// exercitava URL/query real, selecao estrita de tableId, payload malformado ou o
+// retry herdado de wakeRequest(). Suite mirror de readWakeStockByVariantId acima,
+// mesma estrutura A-H do documento de revisao.
+describe('readWakePriceTableByVariantId (revisao Tech Lead PR #4, revisao final #2, item 3)', () => {
+  beforeEach(async () => {
+    vi.useFakeTimers()
+    mockGetSecret.mockReset()
+    mockGetSecret.mockResolvedValue('fake-token')
+    vi.stubGlobal('fetch', vi.fn())
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  function priceTableResponse(tabelasPreco: Array<{ tabelaPrecoId: number; precoDe?: unknown; precoPor?: unknown }> | undefined): string {
+    return JSON.stringify(tabelasPreco === undefined ? {} : { tabelasPreco })
+  }
+
+  it('A. monta a query certa: GET /produtos/{variantId}, tipoIdentificador=ProdutoVarianteId, camposAdicionais=TabelaPreco', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(200, priceTableResponse([{ tabelaPrecoId: 74, precoDe: 10, precoPor: 7.5 }])))
+
+    const result = await readWakePriceTableByVariantId(281145, 74)
+
+    expect(result).toEqual({ precoDe: 10, precoPor: 7.5 })
+    const calledUrl = new URL(vi.mocked(fetch).mock.calls[0]![0] as string)
+    expect(calledUrl.pathname).toBe('/produtos/281145')
+    expect(calledUrl.searchParams.get('tipoIdentificador')).toBe('ProdutoVarianteId')
+    expect(calledUrl.searchParams.get('camposAdicionais')).toBe('TabelaPreco')
+  })
+
+  it('B. tabelasPreco com multiplas entradas: devolve somente a do tableId alvo, ignora as outras', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(
+      fakeResponse(
+        200,
+        priceTableResponse([
+          { tabelaPrecoId: 10, precoDe: 99, precoPor: 88 },
+          { tabelaPrecoId: 74, precoDe: 10, precoPor: 7.5 },
+        ]),
+      ),
+    )
+
+    expect(await readWakePriceTableByVariantId(281145, 74)).toEqual({ precoDe: 10, precoPor: 7.5 })
+  })
+
+  it('C. tableId alvo ausente na lista: devolve null', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(200, priceTableResponse([{ tabelaPrecoId: 99, precoDe: 10, precoPor: 7.5 }])))
+
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+  })
+
+  it('D. tabelasPreco ausente ou nao-array: devolve null', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, priceTableResponse(undefined)))
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, JSON.stringify({ tabelasPreco: 'nao-e-array' })))
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+  })
+
+  it('E. precoDe/precoPor ausente, nao-numerico ou non-finite: fail-closed em todos os casos', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, priceTableResponse([{ tabelaPrecoId: 74 }])))
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, priceTableResponse([{ tabelaPrecoId: 74, precoDe: '10', precoPor: 7.5 }])))
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+
+    vi.mocked(fetch).mockResolvedValueOnce(fakeResponse(200, priceTableResponse([{ tabelaPrecoId: 74, precoDe: 10, precoPor: Number.POSITIVE_INFINITY }])))
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+  })
+
+  it('F. 404 (produto nao encontrado): devolve null, uma unica tentativa, sem retry indevido', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(404, 'Produto nao encontrado'))
+
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('G. 422 (produto nao encontrado): devolve null, consistente com getWakeProductBySku no mesmo endpoint', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(422, 'Produto nao encontrado'))
+
+    expect(await readWakePriceTableByVariantId(281145, 74)).toBeNull()
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('H1. 429/5xx/TypeError transientes: usa a politica central de retry e confirma o valor apos a retentativa', async () => {
+    const { readWakePriceTableByVariantId } = await import('./client')
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fakeResponse(429, 'throttle', { 'Retry-After': '5' }))
+      .mockResolvedValueOnce(fakeResponse(200, priceTableResponse([{ tabelaPrecoId: 74, precoDe: 10, precoPor: 7.5 }])))
+
+    const promise = readWakePriceTableByVariantId(281145, 74)
+    await vi.runAllTimersAsync()
+    const result = await promise
+
+    expect(result).toEqual({ precoDe: 10, precoPor: 7.5 })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('H2. 5xx/rede persistente (retries esgotados): propaga (chamador/engine trata como FAILED, nao null)', async () => {
+    const { readWakePriceTableByVariantId, WakeTransientError } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(500, 'erro interno'))
+
+    const promise = readWakePriceTableByVariantId(281145, 74)
+    const assertion = expect(promise).rejects.toThrow(WakeTransientError)
+    await vi.runAllTimersAsync()
+    await assertion
   })
 })

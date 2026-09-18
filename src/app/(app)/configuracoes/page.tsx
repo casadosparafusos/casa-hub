@@ -10,8 +10,12 @@ const REQUIRED_FIELDS = [
   { key: 'WAKE_STOCK_CONTROL_MODE', label: "'fstore' ou 'erp'", help: '"Controlar estoque pela FStore" ON = fstore (não enviar baixa manual); OFF = erp (enviar baixa explícita). Checar no admin do Wake.' },
   { key: 'WAKE_PRICE_TABLE_ID', label: 'ID da Tabela de Preço "PARAFUSOS - PREÇO CENTO ERP"', help: 'Criar a tabela no admin do Wake primeiro, depois colar o ID aqui.' },
   { key: 'WAKE_PROMOTION_ID', label: 'ID da Promoção "PREÇO CENTO - FIXADORES"', help: 'Não há endpoint confirmado de criação de promoção via API -- criar no admin do Wake.' },
-  { key: 'CSV_IDENTIFIER_TYPE', label: "'sku' ou 'id interno'", help: 'Tipo de identificador enviado nas chamadas de escrita do Wake (tipoIdentificador).' },
 ]
+// CSV_IDENTIFIER_TYPE removida desta lista (revisao Tech Lead PR #4, fix #3):
+// auditoria (grep em src/) confirmou que nenhum consumidor le essa setting --
+// o tipoIdentificador enviado ao Wake e sempre um literal hardcoded por
+// chamada em src/lib/wake/client.ts. Ver comentario equivalente em
+// src/lib/settings.ts (REQUIRED_UNCONFIRMED_KEYS).
 
 const RULE_FIELDS = [
   { key: 'UNIT_PRICE_MARKUP_PERCENT', label: String(RULE_DEFAULTS.UNIT_PRICE_MARKUP_PERCENT), help: 'Markup percentual sobre o preço bruto do ERP para o preço unitário no Wake.' },
@@ -59,6 +63,23 @@ export default async function ConfiguracoesPage() {
 
   const confirmedCount = REQUIRED_FIELDS.length - missing.length
   const allConfirmed = missing.length === 0
+  // Revisao Tech Lead PR #4, final polish (item 1): "todos confirmados" NAO
+  // e o mesmo que "estoque real liberado" -- com WAKE_STOCK_CONTROL_MODE=erp
+  // o backend bloqueia escrita real de estoque de proposito (guard fail-closed
+  // em runSyncLocked(), ver src/lib/sync/engine.ts), mesmo com missing=[].
+  // "Pronto para producao" tambem e amplo demais aqui: essa pagina so cobre
+  // as 4 settings obrigatorias, nao os outros gates (provider real, readiness,
+  // rollout). A barra de progresso continua baseada só na confirmacao das
+  // settings, sem novo fluxo de baixa de estoque inventado.
+  // Revisao Tech Lead PR #4, "one last UI canonicalization fix": values.*
+  // e o texto cru lido por getSetting(), nao a forma canonica que
+  // validateEnumSettingValue() calcularia -- 'ERP'/'ErP' passam no enum
+  // (case-insensitive) mas nao batem em stockMode === 'erp' sem normalizar
+  // aqui, o que mostraria "Configuração confirmada" mesmo com o backend
+  // bloqueando estoque real. Normaliza so pra essa comparacao de exibicao,
+  // sem tocar em regra de negocio nem no backend.
+  const stockMode = values.WAKE_STOCK_CONTROL_MODE?.trim().toLowerCase() ?? null
+  const stockWriteBlocked = allConfirmed && stockMode === 'erp'
 
   return (
     <div className="space-y-6">
@@ -76,18 +97,20 @@ export default async function ConfiguracoesPage() {
               {allConfirmed ? 'Todos os obrigatórios confirmados' : `${confirmedCount} de ${REQUIRED_FIELDS.length} obrigatórios confirmados`}
             </p>
             <p className="mt-0.5 text-xs text-[var(--texto-suave)]">
-              {allConfirmed
-                ? 'Sincronização real liberada.'
-                : `Enquanto houver pendência, a sincronização real fica bloqueada (dry-run continua liberado). Faltam: ${missing.join(', ')}.`}
+              {!allConfirmed
+                ? `Enquanto houver pendência, a sincronização real fica bloqueada (dry-run continua liberado). Faltam: ${missing.join(', ')}.`
+                : stockWriteBlocked
+                  ? 'Preço real pode ser executado, mas estoque real está bloqueado enquanto o modo ERP não tiver fluxo de baixa implementado.'
+                  : 'Configuração apta ao sync real; demais gates de produção (provider real, readiness, rollout) continuam independentes.'}
             </p>
           </div>
           <span
             className={clsx(
               'shrink-0 self-start rounded-full px-3 py-1 text-xs font-bold sm:self-auto',
-              allConfirmed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
+              !allConfirmed ? 'bg-amber-50 text-amber-700' : stockWriteBlocked ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700',
             )}
           >
-            {allConfirmed ? 'Pronto para produção' : 'Somente dry-run'}
+            {!allConfirmed ? 'Somente dry-run' : stockWriteBlocked ? 'Estoque real bloqueado' : 'Configuração confirmada'}
           </span>
         </div>
         <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-[var(--superficie-sunken)]">

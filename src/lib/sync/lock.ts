@@ -1,4 +1,5 @@
 import 'server-only'
+import { randomUUID } from 'node:crypto'
 import { db, schema } from '../db'
 import { eq, and, lt, or, isNull, like } from 'drizzle-orm'
 
@@ -31,15 +32,29 @@ const DEFAULT_TTL_MS = 3 * 60 * 60 * 1000 // 3h -- backstop de crash, nao limite
 // continua valendo como ultima linha de defesa.
 const PID_MARKER = '#pid'
 
+// BUG CORRIGIDO (revisão Tech Lead do PR #4, 2026-09-18): `${lockedBy}#pid${pid}`
+// nao e unico por aquisicao -- duas chamadas de acquireLock no mesmo processo
+// com o mesmo `lockedBy` geram o mesmo token. Se a execucao A passa do TTL e a
+// execucao B (mesmo worker/PID) adquire o lock, o `finally` tardio de A ainda
+// teria o mesmo token e liberaria o lock que agora pertence a B. Cada
+// aquisicao agora carrega um nonce (`randomUUID()`) alem do PID, entao dois
+// tokens do mesmo processo/lockedBy nunca colidem.
+const LOCK_MARKER = '#lock:'
+
 function ownerTag(lockedBy: string): string {
-  return `${lockedBy}${PID_MARKER}${process.pid}`
+  return `${lockedBy}${PID_MARKER}${process.pid}${LOCK_MARKER}${randomUUID()}`
 }
 
 function ownerPid(lockedBy: string | null): number | null {
   if (!lockedBy) return null
   const i = lockedBy.lastIndexOf(PID_MARKER)
   if (i < 0) return null
-  const pid = Number(lockedBy.slice(i + PID_MARKER.length))
+  // O PID e sempre os digitos logo apos o marcador -- usar regex em vez de
+  // `Number()` direto na sobra, porque a sobra agora inclui o nonce
+  // (`123#lock:<uuid>`), que `Number()` nao parseia como inteiro.
+  const match = lockedBy.slice(i + PID_MARKER.length).match(/^(\d+)/)
+  if (!match) return null
+  const pid = Number(match[1])
   return Number.isInteger(pid) && pid > 0 ? pid : null
 }
 
@@ -55,7 +70,15 @@ function isProcessAlive(pid: number): boolean {
 
 export class LockUnavailableError extends Error {}
 
-export async function acquireLock(resource: string, lockedBy: string, ttlMs = DEFAULT_TTL_MS): Promise<void> {
+// FASE D-PRE §7: acquireLock devolve o token que gravou (tag = lockedBy+pid+
+// nonce, unico por acquisicao -- ver LOCK_MARKER acima) e releaseLock exige
+// esse token pra limpar. Sem isso,
+// um TTL expirado com o dono original ainda vivo (rodando mais que o
+// backstop de 3h) deixava outro processo adquirir o lock (result.changes>0
+// no UPDATE condicional por expiresAt), e depois o dono original terminava
+// e chamava releaseLock(resource) sem condicao nenhuma -- limpando o lock do
+// novo dono legitimo enquanto ele ainda estava rodando.
+export async function acquireLock(resource: string, lockedBy: string, ttlMs = DEFAULT_TTL_MS): Promise<string> {
   const now = new Date()
   const expiresAt = new Date(now.getTime() + ttlMs).toISOString()
   const nowIso = now.toISOString()
@@ -74,7 +97,7 @@ export async function acquireLock(resource: string, lockedBy: string, ttlMs = DE
       ),
     )
     .run()
-  if (result.changes > 0) return
+  if (result.changes > 0) return tag
 
   // Ocupado -- mas o dono ainda esta vivo?
   const current = await db.select().from(schema.jobLocks).where(eq(schema.jobLocks.resource, resource)).get()
@@ -88,18 +111,19 @@ export async function acquireLock(resource: string, lockedBy: string, ttlMs = DE
       .run()
     if (stolen.changes > 0) {
       console.warn(`[lock] '${resource}' estava preso por processo morto (${current.lockedBy}) -- liberado`)
-      return
+      return tag
     }
   }
 
   throw new LockUnavailableError(`Recurso '${resource}' ja esta em uso por outra sincronizacao em andamento.`)
 }
 
-export async function releaseLock(resource: string): Promise<void> {
+/** So libera se `token` (devolvido por acquireLock) ainda for o dono atual do lock. */
+export async function releaseLock(resource: string, token: string): Promise<void> {
   await db
     .update(schema.jobLocks)
     .set({ lockedAt: null, lockedBy: null, expiresAt: null })
-    .where(eq(schema.jobLocks.resource, resource))
+    .where(and(eq(schema.jobLocks.resource, resource), eq(schema.jobLocks.lockedBy, token)))
     .run()
 }
 
@@ -110,15 +134,15 @@ export async function releaseLock(resource: string): Promise<void> {
  */
 export async function withLocks<T>(resources: string[], lockedBy: string, fn: () => Promise<T>): Promise<T> {
   const ordered = [...new Set(resources)].sort()
-  const held: string[] = []
+  const held: Array<{ resource: string; token: string }> = []
   try {
     for (const r of ordered) {
-      await acquireLock(r, lockedBy)
-      held.push(r)
+      const token = await acquireLock(r, lockedBy)
+      held.push({ resource: r, token })
     }
     return await fn()
   } finally {
-    for (const r of held.reverse()) await releaseLock(r)
+    for (const { resource, token } of held.reverse()) await releaseLock(resource, token)
   }
 }
 

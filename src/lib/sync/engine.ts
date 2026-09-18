@@ -2,7 +2,7 @@ import 'server-only'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db'
 import { withLocks, LockUnavailableError } from './lock'
-import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource } from '../settings'
+import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource, validateSettingValue, validateEnumSettingValue } from '../settings'
 import { calculateUnitPrice } from '../pricing/engine'
 import { calculateUnitStock } from '../inventory/engine'
 import { moneyRound, type CommercialPolicyConfig } from '../units'
@@ -16,12 +16,12 @@ import {
   updateWakePriceTableProducts,
   getWakeProductBySku,
   readWakeStockByVariantId,
+  readWakePriceTableByVariantId,
   WakeClientError,
   type WakePriceUpdateItem,
   type WakeStockUpdateItem,
   type WakeStockUpdateResponse,
   type WakeStockUpdateResultEntry,
-  type WakePriceTableProductItem,
 } from '../wake/client'
 
 // -----------------------------------------------------------------------
@@ -120,12 +120,35 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
       )
     }
 
-    const { missing } = await checkRequiredUnconfirmed()
+    const { values, missing } = await checkRequiredUnconfirmed()
     if (missing.length > 0) {
       throw new Error(
         `Sincronizacao real recusada -- configuracoes obrigatorias ainda nao confirmadas: ${missing.join(', ')}. ` +
           `Preencha em Configuracoes ou rode em modo dry-run.`,
       )
+    }
+
+    // Revisao Tech Lead PR #4, revisao final #2, item 1: WAKE_STOCK_CONTROL_MODE
+    // e uma setting de 2 valores validos (fstore|erp, ver SETTING_ENUM_RANGES em
+    // ../settings), mas "valor valido" e "modo suportado pra escrita real de
+    // estoque" NAO sao a mesma coisa. `erp` e um estado real possivel da conta
+    // Wake (a integracao trataria a baixa por evento/pedido do lado do ERP) --
+    // porem esse fluxo ainda NAO existe no Casa HUB. Sem este guard,
+    // checkRequiredUnconfirmed() acima aceitava `erp` (valor valido) e deixava
+    // uma sync real de estoque prosseguir como se o fluxo correspondente
+    // existisse. Bloqueio e so pra ESCREVER estoque de verdade: dryRun=true
+    // continua liberado em qualquer modo (so calcula/planeja, nunca escreve),
+    // e kind='price' nunca passa por aqui (nao mexe em estoque).
+    if (kind === 'stock' || kind === 'both') {
+      const stockControlMode = validateEnumSettingValue('WAKE_STOCK_CONTROL_MODE', values.WAKE_STOCK_CONTROL_MODE ?? '')
+      if (stockControlMode === 'erp') {
+        throw new Error(
+          'WAKE_STOCK_CONTROL_MODE_UNSUPPORTED_FOR_REAL_STOCK_SYNC: WAKE_STOCK_CONTROL_MODE=erp e um valor registravel, ' +
+            'mas o Casa HUB ainda nao implementa o fluxo de baixa de estoque por evento/pedido do ERP -- escrita real de ' +
+            'estoque (kind=stock|both) fica bloqueada ate esse fluxo existir. Use WAKE_STOCK_CONTROL_MODE=fstore, ' +
+            'rode com dryRun=true, ou use kind=price.',
+        )
+      }
     }
   }
 
@@ -293,8 +316,19 @@ async function syncPrices(
   // "se o preco unitario mudou" do endpoint base.
   const { values } = await checkRequiredUnconfirmed()
   const priceTableIdRaw = values.WAKE_PRICE_TABLE_ID
-  const priceTableId = priceTableIdRaw && Number.isFinite(Number(priceTableIdRaw)) ? Number(priceTableIdRaw) : null
-  const tableEntries = !dryRun && priceTableId !== null ? await fetchPriceTableEntries(priceTableId) : null
+  // FASE D-PRE §4 (achado independente do Tech Lead): antes, um valor
+  // presente-mas-invalido (ex: "abc") caia silenciosamente em `null` --
+  // igual a AUSENTE -- e a Tabela 74 inteira era pulada sem erro nenhum,
+  // nem no dry-run nem na sync real. Agora so ha dois casos: AUSENTE (null,
+  // ja bloqueado pelo pre-flight de runSyncLocked fora de dry-run) ou
+  // VALIDO -- presente-e-invalido lanca e derruba a run (fail-closed, ver
+  // settings.ts#validateSettingValue).
+  const priceTableId = priceTableIdRaw !== null ? validateSettingValue('WAKE_PRICE_TABLE_ID', priceTableIdRaw) : null
+  // FASE D-PRE §3: essa leitura e READ-ONLY (so GET, nunca POST/PUT) e por
+  // isso roda tambem em dryRun=true -- sem ela, o preview de seguranca do
+  // dry-run nao detectava nenhuma divergencia de special_price na Tabela 74,
+  // enfraquecendo o plano mostrado antes de uma escrita real.
+  const tableEntries = priceTableId !== null ? await fetchPriceTableEntries(priceTableId) : null
 
   const toApplyUnitPrice: Array<{
     product: ManagedProduct
@@ -540,54 +574,158 @@ async function syncPrices(
   // unitario acima (endpoints diferentes do Wake; um falhar nao desfaz o
   // outro). So roda fora de dry-run e com WAKE_PRICE_TABLE_ID configurado.
   if (!dryRun && priceTableId !== null && toApplyTablePrice.length > 0) {
+    // Historico: ate a auditoria da FASE D-PRE (revisao Tech Lead #1), cada
+    // lote de escrita disparava sua PROPRIA releitura paginada da Tabela 74
+    // inteira (fetchPriceTableEntries dentro deste for) -- com P paginas na
+    // tabela e B lotes de escrita, o total de GETs pos-escrita crescia como
+    // P*B, o suficiente pra estourar o rate limit do Wake (120 req/min, 5x
+    // 429 seguidos trava o token por 1h -- ver docs/WAKE-API-CONTRATOS.md).
+    // A partir da revisao Tech Lead #2 (fix #4), a verificacao deixou de ser
+    // uma segunda varredura paginada completa e passou a ser DIRECIONADA por
+    // item efetivamente escrito (readWakePriceTableByVariantId(), ver
+    // comentario mais abaixo) -- formula atual de requests por run: 1 leitura
+    // paginada inicial (diff, topo da funcao) + N leituras direcionadas (1
+    // GET por item escrito), nunca mais um segundo full-scan.
+    //
+    // FIX (revisao Tech Lead #3, item 2): UPDATE e ADD dentro do mesmo lote
+    // agora sao duas operacoes independentes, cada uma com seu proprio
+    // try/catch. Antes, as duas chamadas (updateWakePriceTableProducts +
+    // addWakePriceTableProducts) dividiam UM try/catch por lote -- se o
+    // UPDATE tivesse sucesso e o ADD falhasse (ou vice-versa), o catch unico
+    // marcava o LOTE INTEIRO como failed e os itens do UPDATE que realmente
+    // foram enviados com sucesso nunca entravam em writtenItems, perdendo o
+    // readback e a chance de virar 'applied'. Agora cada metade so afeta os
+    // proprios itens: sucesso de um lado nao e derrubado por falha do outro.
+    const writtenItems: typeof toApplyTablePrice = []
     for (let i = 0; i < toApplyTablePrice.length; i += WAKE_BATCH_SIZE) {
       const batch = toApplyTablePrice.slice(i, i + WAKE_BATCH_SIZE)
-      const toUpdate: WakePriceTableProductItem[] = batch.filter((b) => b.existsInTable).map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor }))
-      const toAdd: WakePriceTableProductItem[] = batch.filter((b) => !b.existsInTable).map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor }))
+      const updateBatch = batch.filter((b) => b.existsInTable)
+      const addBatch = batch.filter((b) => !b.existsInTable)
 
-      try {
-        if (toUpdate.length > 0) await updateWakePriceTableProducts(priceTableId, toUpdate)
-        if (toAdd.length > 0) await addWakePriceTableProducts(priceTableId, toAdd)
-
-        // FASE C §9: updateWakePriceTableProducts/addWakePriceTableProducts
-        // nao devolvem ACK por item (void, ver src/lib/wake/client.ts) --
-        // diferente do preco unitario (GET /produtos/{sku}) e do estoque
-        // (ACK do proprio PUT), o unico jeito de confirmar aqui e reler a
-        // Tabela de Preco inteira, igual fetchPriceTableEntries() ja faz no
-        // topo desta funcao pra montar o diff. Sem isto o bug historico do
-        // SKU 7648 (escrita aceita sem erro, valor no Wake nunca mudou)
-        // ficava sem protecao nenhuma neste caminho.
-        const verifyEntries = await fetchPriceTableEntries(priceTableId)
-        for (const b of batch) {
-          changed++
-          const entry = verifyEntries.get(b.product.wakeSku)
-          const verified = entry !== undefined && entry.precoPor === b.precoPor && entry.precoDe === b.precoDe
-          if (verified) {
-            applied++
-            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
-          } else {
+      if (updateBatch.length > 0) {
+        try {
+          await updateWakePriceTableProducts(
+            priceTableId,
+            updateBatch.map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor })),
+          )
+          writtenItems.push(...updateBatch)
+        } catch (err) {
+          const message = err instanceof WakeClientError ? err.message : String(err)
+          for (const b of updateBatch) {
+            changed++
             failed++
-            const detail =
-              entry === undefined
-                ? 'SKU nao encontrado na Tabela de Preco apos a escrita'
-                : `Tabela de Preco mostra precoPor=${entry.precoPor}/precoDe=${entry.precoDe} (esperado precoPor=${b.precoPor}/precoDe=${b.precoDe})`
-            await logItem({
-              syncRunId,
-              managedProductId: b.product.id,
-              field: 'special_price',
-              targetOldValue: null,
-              targetNewValue: b.precoPor,
-              status: entry === undefined ? 'failed' : 'mismatch',
-              errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia da Tabela de Preco nao confirmou -- ${detail}`,
-            })
+            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', status: 'failed', errorMessage: message })
           }
         }
-      } catch (err) {
-        for (const b of batch) {
-          failed++
-          await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', status: 'failed', errorMessage: err instanceof WakeClientError ? err.message : String(err) })
+      }
+
+      if (addBatch.length > 0) {
+        try {
+          await addWakePriceTableProducts(
+            priceTableId,
+            addBatch.map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor })),
+          )
+          writtenItems.push(...addBatch)
+        } catch (err) {
+          const message = err instanceof WakeClientError ? err.message : String(err)
+          for (const b of addBatch) {
+            changed++
+            failed++
+            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', status: 'failed', errorMessage: message })
+          }
         }
       }
+    }
+
+    // FASE C §9: updateWakePriceTableProducts/addWakePriceTableProducts nao
+    // devolvem ACK por item (void, ver src/lib/wake/client.ts) -- diferente
+    // do preco unitario (GET /produtos/{sku}) e do estoque (ACK do proprio
+    // PUT), o unico jeito de confirmar e reler. Sem isto o bug historico do
+    // SKU 7648 (escrita aceita sem erro, valor no Wake nunca mudou) ficava
+    // sem protecao nenhuma neste caminho.
+    //
+    // FIX (revisao Tech Lead do PR #4, itens #2 e #4, 2026-09-18): a versao
+    // anterior fazia uma SEGUNDA releitura paginada da Tabela 74 inteira
+    // (fetchPriceTableEntries, igual a leitura do diff no topo da funcao) e
+    // essa chamada nao estava em try/catch -- uma falha de rede/429/5xx na
+    // releitura final derrubava a run inteira (throw sem catch) e todos os
+    // writtenItems ficavam SEM status nenhum (nem 'applied' nem 'failed'),
+    // quebrando a trilha de auditoria por produto exigida pela FASE C.
+    // Agora cada item escrito e reconferido por leitura DIRECIONADA
+    // (readWakePriceTableByVariantId(), src/lib/wake/client.ts -- GET
+    // /produtos/{variantId}?tipoIdentificador=ProdutoVarianteId&
+    // camposAdicionais=TabelaPreco), serializada com o mesmo pacing do
+    // preco unitario acima (WAKE_VERIFY_DELAY_MS), preservando a regra
+    // FASE C: SENT -> READ BACK -> VERIFIED | MISMATCH | FAILED. Erro na
+    // leitura de UM item nunca derruba os demais (try/catch por item) e
+    // nunca vira 'mismatch' -- so 'failed', com trilha de auditoria
+    // completa preservada pra cada produto. Formula de requests por run:
+    // 1 leitura paginada inicial (P GETs, pro diff) + N leituras
+    // direcionadas serializadas (1 GET por item escrito) -- nunca mais um
+    // segundo full-scan (P GETs) igual a versao anterior.
+    for (const b of writtenItems) {
+      changed++
+      const variantId = Number(b.product.wakeProductVariantId)
+      let entry: { precoDe: number; precoPor: number } | null = null
+      let readError: string | null = null
+      if (!Number.isFinite(variantId)) {
+        readError = `wakeProductVariantId invalido (${b.product.wakeProductVariantId})`
+      } else {
+        try {
+          entry = await readWakePriceTableByVariantId(variantId, priceTableId)
+        } catch (err) {
+          readError = err instanceof WakeClientError ? err.message : String(err)
+        }
+      }
+
+      if (readError !== null) {
+        // Falha na propria releitura (rede/429/5xx/timeout/variantId invalido)
+        // -- nunca 'mismatch': a escrita pode ter sido aplicada de verdade,
+        // so nao foi possivel confirmar. lastApplied* nao existe pra
+        // special_price (o diff compara contra a Tabela 74 ao vivo, nao
+        // contra estado local -- ver tableEntries no topo da funcao), entao
+        // nao ha nada a "nao avancar" aqui alem de nao marcar 'applied'.
+        failed++
+        await logItem({
+          syncRunId,
+          managedProductId: b.product.id,
+          field: 'special_price',
+          targetOldValue: null,
+          targetNewValue: b.precoPor,
+          status: 'failed',
+          errorMessage: `Falha ao reconferir a Tabela de Preço apos a escrita -- ${readError}`,
+        })
+      } else {
+        const verified = entry !== null && entry.precoPor === b.precoPor && entry.precoDe === b.precoDe
+        if (verified) {
+          applied++
+          await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'applied' })
+        } else {
+          failed++
+          const detail =
+            entry === null
+              ? 'SKU nao encontrado na Tabela de Preco apos a escrita'
+              : `Tabela de Preco mostra precoPor=${entry.precoPor}/precoDe=${entry.precoDe} (esperado precoPor=${b.precoPor}/precoDe=${b.precoDe})`
+          await logItem({
+            syncRunId,
+            managedProductId: b.product.id,
+            field: 'special_price',
+            targetOldValue: null,
+            targetNewValue: b.precoPor,
+            status: entry === null ? 'failed' : 'mismatch',
+            errorMessage: `Wake aceitou a chamada sem erro, mas a reconferencia da Tabela de Preco nao confirmou -- ${detail}`,
+          })
+        }
+      }
+      await sleep(WAKE_VERIFY_DELAY_MS)
+    }
+  } else if (dryRun && priceTableId !== null && toApplyTablePrice.length > 0) {
+    // FASE D-PRE §3: dry-run agora tambem mostra o plano da Tabela 74 (a
+    // leitura de tableEntries no topo da funcao ja roda em dry-run) -- zero
+    // escritor chamado aqui, so log de 'planned' pra cada divergencia.
+    for (const b of toApplyTablePrice) {
+      changed++
+      await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', targetOldValue: null, targetNewValue: b.precoPor, status: 'planned' })
     }
   }
 
@@ -609,7 +747,7 @@ async function syncStock(
   const { values } = await checkRequiredUnconfirmed()
   const wakeCdId = values.WAKE_CD_ID
 
-  if (!wakeCdId) {
+  if (wakeCdId === null) {
     // dry-run pode chegar aqui sem esse valor -- registra e sai, sem quebrar a run inteira.
     // CISS_STOCK_ENTERPRISE/CISS_STOCK_LOCATION nao bloqueiam mais: ja tem
     // default real confirmado (ver src/lib/settings.ts, STOCK_SOURCE_DEFAULTS).
@@ -619,6 +757,15 @@ async function syncStock(
     }
     return { changed, applied, skipped, failed }
   }
+
+  // FASE D-PRE §4 (achado independente do Tech Lead): o check antigo era
+  // `if (!wakeCdId)`, que so pega string vazia -- um valor presente-mas-nao-
+  // numerico (ex: "abc") passava direto (string nao-vazia e truthy) e virava
+  // NaN nos dois `Number(wakeCdId)` abaixo (PUT de estoque e leitura de
+  // conferencia), mandando um centro de distribuicao invalido pro Wake sem
+  // erro nenhum. Agora presente-e-invalido lanca e derruba a run inteira
+  // (fail-closed), igual ao resto dos 12 settings desta faixa.
+  const wakeCdIdNumber = validateSettingValue('WAKE_CD_ID', wakeCdId)
 
   // BLOQUEIO E (FASE B.2): status explicito e fail-closed pra "CISS
   // respondeu OK mas nunca teve linha de estoque pra este produto" --
@@ -738,7 +885,7 @@ async function syncStock(
       const batch = toApply.slice(i, i + WAKE_BATCH_SIZE)
       const payload: WakeStockUpdateItem[] = batch.map((b) => ({
         identificador: b.product.wakeSku,
-        listaEstoque: [{ produtoVarianteId: Number(b.product.wakeProductVariantId), centroDistribuicaoId: Number(wakeCdId), estoqueFisico: b.targetStock }],
+        listaEstoque: [{ produtoVarianteId: Number(b.product.wakeProductVariantId), centroDistribuicaoId: wakeCdIdNumber, estoqueFisico: b.targetStock }],
       }))
 
       let putResponse: WakeStockUpdateResponse | null = null
@@ -775,21 +922,17 @@ async function syncStock(
       // src/lib/wake/client.ts). Um item rejeitado no ACK falha direto, sem
       // gastar uma releitura -- ja se sabe que o Wake recusou.
       //
-      // FASE C.1 (17/09/2026), BLOQUEIO revisado: ACK sozinho NAO e mais
-      // suficiente pra marcar 'applied'. O ack confirma so que o Wake
-      // ACEITOU processar a chamada -- nao prova que o estado remoto ficou
-      // no valor esperado (regra canonica: "writer 2xx/ACK != estado remoto
-      // verificado"). Ate 17/09/2026 o ack era tratado como prova suficiente
-      // (ver git blame) porque `GET /produtos/{sku}` -- unico endpoint de
-      // releitura conhecido na epoca -- sempre devolve `estoque: []`,
-      // parecendo tornar releitura de estoque impossivel (ver o bug de
-      // `dataAtualizacao` historico abaixo). readWakeStockByVariantId()
-      // (src/lib/wake/client.ts) usa outro endpoint (`GET /produtos`,
-      // listagem/catalogo com `camposAdicionais=Estoque`) que de fato
-      // devolve `estoque[]` populado -- validado ao vivo em producao
-      // (11/09/2026, `c7616d7`, ver scripts/reconcile/wake-reader.ts). Todo
-      // item aceito no ACK agora passa por essa releitura real antes de
-      // 'applied'; ACK aceito + releitura confirma valor -> VERIFIED;
+      // FASE C.2, BLOQUEIO revisado: ACK sozinho NAO e suficiente pra marcar
+      // 'applied'. O ack confirma so que o Wake ACEITOU processar a chamada
+      // -- nao prova que o estado remoto ficou no valor esperado (regra
+      // canonica: "writer 2xx/ACK != estado remoto verificado").
+      // readWakeStockByVariantId() (src/lib/wake/client.ts) usa o endpoint
+      // dedicado `GET /produtos/{identificador}/estoque`, que devolve o
+      // estoque por centro de distribuicao de verdade -- diferente de
+      // `GET /produtos/{sku}` (ver o bug de `dataAtualizacao` historico
+      // abaixo), que sempre devolve `estoque: []` e nunca serviu pra
+      // reconferencia. Todo item aceito no ACK passa por essa releitura real
+      // antes de 'applied'; ACK aceito + releitura confirma valor -> VERIFIED;
       // ACK aceito + releitura acha valor diferente -> MISMATCH; ACK aceito
       // + releitura nao confirma (produto sumiu/campo ausente) ou lanca
       // erro -> FAILED. `lastAppliedWakeStock` so avanca no caminho VERIFIED.
@@ -864,7 +1007,7 @@ async function syncStock(
         let mismatch = false
         let readDetail = ''
         try {
-          const observed = Number.isFinite(variantId) ? await readWakeStockByVariantId(variantId, Number(wakeCdId)) : null
+          const observed = Number.isFinite(variantId) ? await readWakeStockByVariantId(variantId, wakeCdIdNumber) : null
           if (observed === null) {
             readDetail = 'releitura nao confirmou o item (produto nao encontrado nessa posicao, ou campo estoque[] ausente/sem entrada pro CD configurado)'
           } else if (observed === b.targetStock) {

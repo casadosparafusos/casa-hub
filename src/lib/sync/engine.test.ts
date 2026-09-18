@@ -73,6 +73,11 @@ const mockUpdateWakePriceTableProducts = vi.fn<(tabelaPrecoId: number, items: Ar
 // de rede de verdade (readWakeStockByVariantId real) -- ver descoberta do
 // gap de mock antes de escrever os testes de estoque desta rodada.
 const mockReadWakeStockByVariantId = vi.fn<(variantId: number, cdId: number) => Promise<number | null>>()
+// Revisao Tech Lead PR #4, fix #4: sem este mock, readWakePriceTableByVariantId
+// (nova funcao, substitui o segundo full-scan) cai no `...actual` abaixo e
+// dispara uma chamada de rede de verdade -- exatamente o gap de mock que ja
+// tinha side mordido readWakeStockByVariantId antes (ver comentario acima).
+const mockReadWakePriceTableByVariantId = vi.fn<(variantId: number, tableId: number) => Promise<{ precoDe: number; precoPor: number } | null>>()
 
 vi.mock('../wake/client', async () => {
   const actual = await vi.importActual<typeof import('../wake/client')>('../wake/client')
@@ -85,6 +90,7 @@ vi.mock('../wake/client', async () => {
     addWakePriceTableProducts: (...args: Parameters<typeof mockAddWakePriceTableProducts>) => mockAddWakePriceTableProducts(...args),
     updateWakePriceTableProducts: (...args: Parameters<typeof mockUpdateWakePriceTableProducts>) => mockUpdateWakePriceTableProducts(...args),
     readWakeStockByVariantId: (...args: Parameters<typeof mockReadWakeStockByVariantId>) => mockReadWakeStockByVariantId(...args),
+    readWakePriceTableByVariantId: (...args: Parameters<typeof mockReadWakePriceTableByVariantId>) => mockReadWakePriceTableByVariantId(...args),
   }
 })
 
@@ -170,16 +176,17 @@ beforeEach(async () => {
   mockAddWakePriceTableProducts.mockReset().mockResolvedValue(undefined)
   mockUpdateWakePriceTableProducts.mockReset().mockResolvedValue(undefined)
   mockReadWakeStockByVariantId.mockReset().mockResolvedValue(null)
+  mockReadWakePriceTableByVariantId.mockReset().mockResolvedValue(null)
   unitPriceOverride = null
 
-  // Os 5 REQUIRED_UNCONFIRMED_KEYS (ver src/lib/settings.ts) -- so
+  // Os 4 REQUIRED_UNCONFIRMED_KEYS (ver src/lib/settings.ts) -- so
   // necessarios pra dryRun:false passar por checkRequiredUnconfirmed() sem
   // recusar a run; nao afetam os testes dry-run existentes (que ignoram
-  // "missing").
+  // "missing"). CSV_IDENTIFIER_TYPE removida desta lista na revisao Tech
+  // Lead do PR #4 (fix #3) -- nao tem consumidor real, ver settings.ts.
   process.env.WAKE_STOCK_CONTROL_MODE = 'fstore'
   process.env.WAKE_PRICE_TABLE_ID = '74'
   process.env.WAKE_PROMOTION_ID = '10365'
-  process.env.CSV_IDENTIFIER_TYPE = 'sku'
 })
 
 let nextCissId = 1
@@ -393,12 +400,15 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
     mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
-    // 1a chamada (topo de syncPrices, monta o diff): tabela vazia -- produto
-    // ainda nao existe la, vai por addWakePriceTableProducts. 2a chamada
-    // (FASE C §9, reconferencia pos-escrita): tabela ja reflete o item
-    // recem-adicionado -- senao o novo readback marcaria 'failed'/'mismatch'
-    // e este teste, que so quer provar o payload do Wake, quebraria.
-    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-CT-WRITE', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
+    // Leitura inicial (topo de syncPrices, monta o diff): tabela vazia --
+    // produto ainda nao existe la, vai por addWakePriceTableProducts.
+    // Readback pos-escrita (FASE C §9 / fix #4 Tech Lead PR #4): agora
+    // direcionado por variantId, nao mais uma segunda varredura completa --
+    // confirma o item recem-adicionado, senao o readback marcaria
+    // 'failed'/'mismatch' e este teste, que so quer provar o payload do
+    // Wake, quebraria.
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockResolvedValueOnce({ precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -661,6 +671,105 @@ describe('runSync -- MOCK_PROVIDER_WRITE_BLOCKED (FASE C §3/§4)', () => {
   })
 })
 
+describe('runSync -- WAKE_STOCK_CONTROL_MODE=erp bloqueia escrita real de estoque (revisao Tech Lead PR #4, revisao final #2, item 1)', () => {
+  it('fstore + kind=stock + dryRun=false: guard nao se aplica, escrita real de estoque prossegue', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCKMODE-FSTORE-STOCK' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(5)
+
+    const result = await runSync({ kind: 'stock', trigger: 'manual', dryRun: false })
+
+    expect(result.status).toBe('success')
+    expect(mockUpdateWakeStock).toHaveBeenCalledTimes(1)
+  })
+
+  it('fstore + kind=both + dryRun=false: guard nao se aplica, escrita real de preco+estoque prossegue', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-STOCKMODE-FSTORE-BOTH' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(5)
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(result.status).toBe('success')
+    expect(mockUpdateWakeStock).toHaveBeenCalledTimes(1)
+  })
+
+  it('erp + kind=stock + dryRun=false: bloqueia ANTES de criar sync_run e ANTES de qualquer writer, erro explicito', async () => {
+    process.env.WAKE_STOCK_CONTROL_MODE = 'erp'
+    const product = await insertProduct({ wakeSku: 'SKU-STOCKMODE-ERP-STOCK' })
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+
+    await expect(runSync({ kind: 'stock', trigger: 'manual', dryRun: false })).rejects.toThrow('WAKE_STOCK_CONTROL_MODE_UNSUPPORTED_FOR_REAL_STOCK_SYNC')
+
+    const runs = await db.select().from(schema.syncRuns)
+    expect(runs).toHaveLength(0)
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+  })
+
+  it('erp + kind=both + dryRun=false: bloqueia ANTES de criar sync_run e ANTES de qualquer writer (preco tambem nao roda)', async () => {
+    process.env.WAKE_STOCK_CONTROL_MODE = 'erp'
+    const product = await insertProduct({ wakeSku: 'SKU-STOCKMODE-ERP-BOTH' })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+
+    await expect(runSync({ kind: 'both', trigger: 'manual', dryRun: false })).rejects.toThrow('WAKE_STOCK_CONTROL_MODE_UNSUPPORTED_FOR_REAL_STOCK_SYNC')
+
+    const runs = await db.select().from(schema.syncRuns)
+    expect(runs).toHaveLength(0)
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+
+  it('erp + kind=price + dryRun=false: guard e especifico de estoque, NAO bloqueia sync de preco', async () => {
+    process.env.WAKE_STOCK_CONTROL_MODE = 'erp'
+    const product = await insertProduct({ wakeSku: 'SKU-STOCKMODE-ERP-PRICE' })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 5, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+
+    const result = await runSync({ kind: 'price', trigger: 'manual', dryRun: false })
+
+    expect(result.status).toBe('success')
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+  })
+
+  it('erp + kind=stock|both + dryRun=true: guard nao se aplica em dry-run, zero writer chamado', async () => {
+    process.env.WAKE_STOCK_CONTROL_MODE = 'erp'
+    const productStock = await insertProduct({ wakeSku: 'SKU-STOCKMODE-ERP-DRYRUN-STOCK' })
+    mockFetchStockForProducts.mockResolvedValueOnce([{ productId: productStock.cissProductId, stock: 5, unitRaw: 'PC' }])
+
+    const stockResult = await runSync({ kind: 'stock', trigger: 'manual', dryRun: true })
+    expect(stockResult.status).toBe('success')
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+
+    // Desativa o produto do sub-teste anterior antes do segundo runSync --
+    // runSync varre TODOS os managedProducts com active=true, e este teste
+    // roda duas chamadas na mesma unit test (sem reset de DB entre elas), sem
+    // isso o segundo runSync tentaria reprocessar productStock sem preco/
+    // estoque mockados pra ele e falharia por motivo alheio ao guard testado.
+    await db.update(schema.managedProducts).set({ active: false }).where(eq(schema.managedProducts.id, productStock.id))
+
+    const productBoth = await insertProduct({ wakeSku: 'SKU-STOCKMODE-ERP-DRYRUN-BOTH' })
+    mockGetRetailPrices.mockResolvedValue(new Map([[productBoth.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValueOnce([{ productId: productBoth.cissProductId, stock: 5, unitRaw: 'PC' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 10 })
+
+    const bothResult = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(bothResult.status).toBe('success')
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+  })
+})
+
 describe('runSync -- distincao MISMATCH vs FAILED na reconferencia de preco (FASE C §5/§6/§7)', () => {
   it('Wake aceita o PUT sem erro mas a releitura mostra outro valor: status mismatch (nao failed); lastApplied* nao avanca', async () => {
     const product = await insertProduct({ wakeSku: 'SKU-PRICE-MISMATCH' })
@@ -710,7 +819,8 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
     mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
-    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-T74-OK', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockResolvedValueOnce({ precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -718,6 +828,7 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
     const tableItem = items.find((i) => i.field === 'special_price')
     expect(tableItem?.status).toBe('applied')
     expect(result.status).toBe('success')
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(variantId, 74)
   })
 
   it('escrita aceita mas a releitura mostra outro valor na tabela: status mismatch, run nao fica success', async () => {
@@ -731,7 +842,8 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
     // antigo na releitura -- reproduz o bug historico do SKU 7648 (escrita
     // aceita, valor no Wake nunca mudou), agora pego pelo readback: antes
     // do FASE C isto seria marcado 'applied' sem nenhuma verificacao.
-    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-T74-MISMATCH', precoDe: moneyRound(3 * 1.3), precoPor: 3 }])
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockResolvedValueOnce({ precoDe: moneyRound(3 * 1.3), precoPor: 3 })
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -749,7 +861,8 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
     mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
-    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockResolvedValueOnce(null)
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
@@ -759,7 +872,104 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
     expect(tableItem?.errorMessage).toContain('nao encontrado na Tabela de Preco')
   })
 
-  it('N SKUs alterados na Tabela 74 geram 1 + numero-de-lotes releituras, nunca 1 por SKU (FASE C.1 §7 -- audita o BLOCKER de performance da revisao do PR #3)', async () => {
+  it('revisao Tech Lead PR #4, fix #2: releitura final lanca (429/5xx/timeout/network) -- todos os writtenItems ficam failed, nunca mismatch, run partial/failed com trilha completa (teste A: 1 batch)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-READBACK-ERR' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20)
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(tableItem?.status).toBe('failed')
+    expect(tableItem?.errorMessage).toContain('Falha ao reconferir a Tabela de Preço')
+    expect(result.status).not.toBe('success')
+  })
+
+  it('revisao Tech Lead PR #4, revisao final #2, item 4: teste "3 batches" reescrito como multi-batch de verdade -- >100 produtos => 3 lotes reais de escrita (50+50+resto), todos os writes passam, todas as releituras falham, todos os itens ficam failed com trilha completa', async () => {
+    // Achado da revisao final #2 (item 4): o teste anterior com esse nome
+    // criava so 3 produtos -- com WAKE_BATCH_SIZE=50 isso e UM lote, nao
+    // tres, o proprio comentario do teste antigo admitia isso. Este teste
+    // reusa a estrutura do teste de fix #4 acima (>100 produtos, diff
+    // inicial com 110 entradas alheias paginadas em 50+50+10) mas inverte o
+    // resultado da releitura: aqui TODOS os GETs direcionados
+    // (readWakePriceTableByVariantId) rejeitam, entao os itens dos 3 lotes
+    // devem virar 'failed' -- nunca 'mismatch', nunca sem status.
+    const CHANGED_COUNT = 110
+    const products = await Promise.all(Array.from({ length: CHANGED_COUNT }, (_, i) => insertProduct({ wakeSku: `SKU-T74-MULTIBATCH-FAIL-${i + 1}` })))
+    const variantIds = products.map((p) => Number(p.wakeProductVariantId))
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({
+      produtosAtualizados: variantIds.map((variantId) => ({ produtoVarianteId: variantId, resultado: true })),
+      produtosNaoAtualizados: [],
+    })
+    mockReadWakeStockByVariantId.mockResolvedValue(20)
+
+    const otherEntries = (start: number, count: number) => Array.from({ length: count }, (_, i) => ({ sku: `SKU-OTHER-${start + i}`, precoDe: 10, precoPor: 7.5 }))
+    mockGetWakePriceTableProducts
+      // Leitura inicial (diff): tabela com 110 entradas ALHEIAS, paginada em
+      // 3 chamadas (50+50+10) -- nenhuma bate com os SKUs deste teste, todos
+      // os 110 produtos entram como ADD (existsInTable=false).
+      .mockResolvedValueOnce(otherEntries(1, 50))
+      .mockResolvedValueOnce(otherEntries(51, 50))
+      .mockResolvedValueOnce(otherEntries(101, 10))
+    // Todos os writes (addWakePriceTableProducts) tem sucesso -- so a
+    // releitura pos-escrita falha, pra isolar exatamente o cenario do item
+    // 4 (multi-batch real + readback com falha total).
+    mockReadWakePriceTableByVariantId.mockRejectedValue(new Error('timeout'))
+
+    vi.useFakeTimers()
+    try {
+      const resultPromise = runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+      await vi.runAllTimersAsync()
+      const result = await resultPromise
+
+      // 3 lotes de escrita reais (50+50+10) -- prova que o cenario tem B=3
+      // de verdade, nao B=1 disfarcado de "3 batches" como no teste anterior.
+      expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(3)
+      expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+      expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledTimes(CHANGED_COUNT)
+
+      const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+      const tableItems = items.filter((i) => i.field === 'special_price')
+      expect(tableItems).toHaveLength(CHANGED_COUNT)
+      expect(tableItems.every((i) => i.status === 'failed')).toBe(true)
+      expect(result.status).not.toBe('success')
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 20000)
+
+  it('revisao Tech Lead PR #4, fix #2 (teste C): outro caminho ja VERIFIED (estoque applied) + Table74 readback falha -- run partial, trilha completa preservada', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-PARTIAL' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20) // estoque confirma -> applied/verified nesse caminho
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const stockItem = items.find((i) => i.field === 'stock')
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(stockItem?.status).toBe('applied')
+    expect(tableItem?.status).toBe('failed')
+    expect(result.status).toBe('partial')
+  })
+
+  it('revisao Tech Lead PR #4, fix #4 (teste A parcial): N SKUs alterados na Tabela 74 -- zero segunda varredura completa, releitura direcionada 1x por item escrito', async () => {
     const products = await Promise.all([1, 2, 3].map((i) => insertProduct({ wakeSku: `SKU-T74-BATCH-${i}` })))
     const variantIds = products.map((p) => Number(p.wakeProductVariantId))
     mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
@@ -770,20 +980,290 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
       produtosNaoAtualizados: [],
     })
     mockReadWakeStockByVariantId.mockResolvedValue(20)
-    // 1a chamada (diff inicial, topo de syncPrices): tabela vazia -- os 3
-    // produtos cabem num unico lote de escrita (WAKE_BATCH_SIZE=50, bem acima
-    // de 3), entao a releitura pos-escrita (FASE C §9) tambem e 1 unica
-    // chamada, nao 3. Total esperado: 1 (diff) + 1 (lote) = 2 -- NUNCA
-    // 1 + 3 (que seria releitura por SKU, o padrao que o §7 classifica como
-    // BLOCKER).
-    mockGetWakePriceTableProducts
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(products.map((p) => ({ sku: p.wakeSku, precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })))
+    // Unica chamada a getWakePriceTableProducts esperada: a leitura inicial
+    // do diff. O fix #4 elimina o segundo full-scan -- a verificacao
+    // pos-escrita agora e 1 GET direcionado por item via
+    // readWakePriceTableByVariantId, nunca mais uma segunda varredura
+    // paginada completa (o padrao que o §7 da revisao anterior classificou
+    // como BLOCKER de performance).
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockResolvedValue({ precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })
 
     const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
 
-    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(2)
+    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledTimes(3)
+    for (const variantId of variantIds) {
+      expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(variantId, 74)
+    }
     expect(result.status).toBe('success')
+  }, 15000)
+
+  it('FASE D-PRE §2 / revisao Tech Lead PR #4 fix #4 (teste A): >100 entradas na Tabela 74 e >50 alteracoes em varios lotes de escrita -- 1 leitura paginada inicial + N leituras direcionadas serializadas, ZERO segundo full-scan', async () => {
+    // Reproduz o achado do Tech Lead: a versao anterior do PR fazia uma
+    // segunda varredura paginada completa apos os writes (2P GETs no total).
+    // Sob o fix atual, o segundo full-scan desaparece -- o total de GETs
+    // pos-escrita passa a ser N (1 por item escrito, serializado e
+    // pacenado por WAKE_VERIFY_DELAY_MS), nunca P*algo.
+    const priceResult = actualCalculateUnitPrice({ unitRaw: 'CT', cissPrice: 300 })
+    if (!priceResult.ok) throw new Error('fixture invalida: CT deveria resolver como FIXADOR_CENTO')
+    const targetPrecoPor = priceResult.retailPrice
+    const targetPrecoDe = moneyRound(targetPrecoPor * 1.3)
+
+    const CHANGED_COUNT = 110
+    const products = await Promise.all(Array.from({ length: CHANGED_COUNT }, (_, i) => insertProduct({ wakeSku: `SKU-T74-BULK-${i + 1}` })))
+    // Preco unitario ja aplicado e identico ao alvo -- prioriza isolar o
+    // teste na Tabela 74 (evita os 110 sleeps de WAKE_VERIFY_DELAY_MS do
+    // caminho de preco unitario, que nao e o que este teste audita).
+    for (const product of products) {
+      await db.insert(schema.syncProductState).values({
+        managedProductId: product.id,
+        lastAppliedWakeUnitPrice: targetPrecoPor,
+        lastAppliedWakeSpecialPrice: priceResult.expectedWholesalePrice,
+      })
+    }
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+
+    const otherEntries = (start: number, count: number) => Array.from({ length: count }, (_, i) => ({ sku: `SKU-OTHER-${start + i}`, precoDe: 10, precoPor: 7.5 }))
+
+    mockGetWakePriceTableProducts
+      // Leitura inicial (diff, topo de syncPrices): tabela com 110 entradas
+      // ALHEIAS (nenhuma bate com os SKUs deste teste) -- paginada em 3
+      // chamadas (50+50+10). Esta e a UNICA leitura paginada da run inteira.
+      .mockResolvedValueOnce(otherEntries(1, 50))
+      .mockResolvedValueOnce(otherEntries(51, 50))
+      .mockResolvedValueOnce(otherEntries(101, 10))
+    // Readback pos-escrita: 1 GET direcionado por item, confirmando o valor
+    // escrito -- nunca uma segunda pagina de getWakePriceTableProducts.
+    mockReadWakePriceTableByVariantId.mockResolvedValue({ precoDe: targetPrecoDe, precoPor: targetPrecoPor })
+
+    // Os 110 GETs direcionados sao serializados com WAKE_VERIFY_DELAY_MS
+    // (650ms) entre cada um, exatamente como o Tech Lead exigiu (pacing
+    // conservador, abaixo de 120 req/min) -- em tempo real isso levaria
+    // ~71s. Fake timers avancam esse tempo sem esperar de verdade.
+    vi.useFakeTimers()
+    try {
+      const resultPromise = runSync({ kind: 'price', trigger: 'manual', dryRun: false })
+      await vi.runAllTimersAsync()
+      const result = await resultPromise
+
+      expect(result.status).toBe('success')
+      // 3 lotes de escrita de fato ocorreram (50+50+10) -- confirma que o
+      // cenario testado tem B=3, nao B=1.
+      expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(3)
+      expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+      // Leitura paginada continua em 3 (so a leitura inicial do diff) --
+      // NUNCA mais 6 (que seria 2 varreduras completas) nem 12 (o bug
+      // original P*(1+B) com B=3).
+      expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(3)
+      // Readback direcionado: exatamente 1 por item escrito, nunca uma
+      // segunda varredura completa.
+      expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledTimes(CHANGED_COUNT)
+
+      const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+      const tableItems = items.filter((i) => i.field === 'special_price')
+      expect(tableItems).toHaveLength(CHANGED_COUNT)
+      expect(tableItems.every((i) => i.status === 'applied')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 20000)
+
+  it('revisao Tech Lead PR #4, fix #4 (teste B): multiplas tabelas no retorno do Wake -- seleciona estritamente a tabela alvo, nunca outra como fallback', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-MULTITABLE' })
+    const variantId = Number(product.wakeProductVariantId)
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
+    mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
+    mockReadWakeStockByVariantId.mockResolvedValue(20)
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    // O client real (readWakePriceTableByVariantId, testado isoladamente em
+    // client.test.ts) e quem aplica o `.find(t => t.tabelaPrecoId === tableId)`
+    // -- aqui o mock so precisa devolver o valor JA filtrado pra tabela 74,
+    // simulando o que o client real devolveria mesmo com multiplas tabelas
+    // na resposta do Wake (outra tabela, ex. 10, nunca deve ser usada como
+    // fallback).
+    mockReadWakePriceTableByVariantId.mockResolvedValueOnce({ precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(variantId, 74)
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(tableItem?.status).toBe('applied')
+    expect(result.status).toBe('success')
+  })
+
+  it('revisao Tech Lead PR #4, fix #4 (teste F): dry-run -- leitura inicial permitida, special_price=planned, zero writers e zero readback pos-write', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-T74-DRYRUN' })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 300]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 2, unitRaw: 'CT' }])
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItem = items.find((i) => i.field === 'special_price')
+    expect(tableItem?.status).toBe('planned')
+    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockReadWakePriceTableByVariantId).not.toHaveBeenCalled()
+  })
+
+  it('revisao Tech Lead PR #4, revisao final #2, item 2 (teste A): mesmo lote com UPDATE (existentes) + ADD (novos) -- UPDATE sucesso, ADD falha -- UPDATE recebe readback e fica applied, ADD fica failed, run partial', async () => {
+    // Achado da revisao final #2 (item 2): antes, updateWakePriceTableProducts
+    // e addWakePriceTableProducts dividiam UM try/catch por lote -- se o
+    // UPDATE tivesse sucesso e o ADD falhasse, o catch unico marcava o LOTE
+    // INTEIRO como failed e os UPDATEs que ja tinham sido enviados com
+    // sucesso nunca entravam em writtenItems (perdendo o readback e a chance
+    // de virar 'applied'). Agora cada metade e independente.
+    const [p1, p2, p3, p4] = await Promise.all([
+      insertProduct({ wakeSku: 'SKU-T74-MIX-A-UPD-1' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-A-UPD-2' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-A-ADD-1' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-A-ADD-2' }),
+    ])
+    const products = [p1, p2, p3, p4]
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+
+    const targetPrecoPor = 3.6
+    const targetPrecoDe = moneyRound(targetPrecoPor * 1.3)
+    // p1/p2 ja existem na Tabela 74 (leitura inicial do diff) com valor
+    // DIFERENTE do alvo -- forca existsInTable=true (UPDATE). p3/p4 nao
+    // aparecem nessa leitura -- forca existsInTable=false (ADD).
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([
+      { sku: p1.wakeSku, precoDe: moneyRound(3 * 1.3), precoPor: 3 },
+      { sku: p2.wakeSku, precoDe: moneyRound(3 * 1.3), precoPor: 3 },
+    ])
+    mockUpdateWakePriceTableProducts.mockResolvedValueOnce(undefined)
+    mockAddWakePriceTableProducts.mockRejectedValueOnce(new Error('ADD indisponivel'))
+    mockReadWakePriceTableByVariantId.mockResolvedValue({ precoDe: targetPrecoDe, precoPor: targetPrecoPor })
+
+    const result = await runSync({ kind: 'price', trigger: 'manual', dryRun: false })
+
+    expect(mockUpdateWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockUpdateWakePriceTableProducts).toHaveBeenCalledWith(
+      74,
+      expect.arrayContaining([expect.objectContaining({ sku: p1.wakeSku }), expect.objectContaining({ sku: p2.wakeSku })]),
+    )
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledWith(
+      74,
+      expect.arrayContaining([expect.objectContaining({ sku: p3.wakeSku }), expect.objectContaining({ sku: p4.wakeSku })]),
+    )
+    // So os itens do UPDATE (que teve sucesso) entram no readback -- exatamente
+    // o bug que este fix corrige: a falha do ADD nao pode derrubar o readback
+    // dos UPDATEs que ja foram enviados com sucesso.
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledTimes(2)
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(Number(p1.wakeProductVariantId), 74)
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(Number(p2.wakeProductVariantId), 74)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItems = items.filter((i) => i.field === 'special_price')
+    const bySku = new Map(tableItems.map((i) => [products.find((p) => p.id === i.managedProductId)?.wakeSku, i]))
+    expect(bySku.get(p1.wakeSku)?.status).toBe('applied')
+    expect(bySku.get(p2.wakeSku)?.status).toBe('applied')
+    expect(bySku.get(p3.wakeSku)?.status).toBe('failed')
+    expect(bySku.get(p4.wakeSku)?.status).toBe('failed')
+    expect(bySku.get(p3.wakeSku)?.errorMessage).toContain('ADD indisponivel')
+    expect(bySku.get(p4.wakeSku)?.errorMessage).toContain('ADD indisponivel')
+    expect(result.status).toBe('partial')
+  })
+
+  it('revisao Tech Lead PR #4, revisao final #2, item 2 (teste B): UPDATE falha, ADD sucesso -- ADD ainda e tentado (nao e pulado por causa do UPDATE) e recebe readback; UPDATE fica failed', async () => {
+    const [p1, p2, p3, p4] = await Promise.all([
+      insertProduct({ wakeSku: 'SKU-T74-MIX-B-UPD-1' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-B-UPD-2' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-B-ADD-1' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-B-ADD-2' }),
+    ])
+    const products = [p1, p2, p3, p4]
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+
+    const targetPrecoPor = 3.6
+    const targetPrecoDe = moneyRound(targetPrecoPor * 1.3)
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([
+      { sku: p1.wakeSku, precoDe: moneyRound(3 * 1.3), precoPor: 3 },
+      { sku: p2.wakeSku, precoDe: moneyRound(3 * 1.3), precoPor: 3 },
+    ])
+    mockUpdateWakePriceTableProducts.mockRejectedValueOnce(new Error('UPDATE indisponivel'))
+    mockAddWakePriceTableProducts.mockResolvedValueOnce(undefined)
+    mockReadWakePriceTableByVariantId.mockResolvedValue({ precoDe: targetPrecoDe, precoPor: targetPrecoPor })
+
+    const result = await runSync({ kind: 'price', trigger: 'manual', dryRun: false })
+
+    // O ADD tem que ser tentado independente do resultado do UPDATE -- prova
+    // de que as duas operacoes nao compartilham mais o mesmo try/catch.
+    expect(mockUpdateWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledTimes(2)
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(Number(p3.wakeProductVariantId), 74)
+    expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(Number(p4.wakeProductVariantId), 74)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItems = items.filter((i) => i.field === 'special_price')
+    const bySku = new Map(tableItems.map((i) => [products.find((p) => p.id === i.managedProductId)?.wakeSku, i]))
+    expect(bySku.get(p1.wakeSku)?.status).toBe('failed')
+    expect(bySku.get(p2.wakeSku)?.status).toBe('failed')
+    expect(bySku.get(p1.wakeSku)?.errorMessage).toContain('UPDATE indisponivel')
+    expect(bySku.get(p2.wakeSku)?.errorMessage).toContain('UPDATE indisponivel')
+    expect(bySku.get(p3.wakeSku)?.status).toBe('applied')
+    expect(bySku.get(p4.wakeSku)?.status).toBe('applied')
+    expect(result.status).toBe('partial')
+  })
+
+  it('revisao Tech Lead PR #4, revisao final #2, item 2 (teste C): UPDATE e ADD ambos com sucesso -- todos os itens (dos dois grupos) entram no readback e ficam applied', async () => {
+    const [p1, p2, p3, p4] = await Promise.all([
+      insertProduct({ wakeSku: 'SKU-T74-MIX-C-UPD-1' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-C-UPD-2' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-C-ADD-1' }),
+      insertProduct({ wakeSku: 'SKU-T74-MIX-C-ADD-2' }),
+    ])
+    const products = [p1, p2, p3, p4]
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+
+    const targetPrecoPor = 3.6
+    const targetPrecoDe = moneyRound(targetPrecoPor * 1.3)
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([
+      { sku: p1.wakeSku, precoDe: moneyRound(3 * 1.3), precoPor: 3 },
+      { sku: p2.wakeSku, precoDe: moneyRound(3 * 1.3), precoPor: 3 },
+    ])
+    mockUpdateWakePriceTableProducts.mockResolvedValueOnce(undefined)
+    mockAddWakePriceTableProducts.mockResolvedValueOnce(undefined)
+    mockReadWakePriceTableByVariantId.mockResolvedValue({ precoDe: targetPrecoDe, precoPor: targetPrecoPor })
+    // Sem isso, o default do mock (mockGetWakeProductBySku -> null) faz a
+    // releitura do preco unitario "sumir" e o item unit_price virar failed,
+    // mascarando o resultado 'success' que este teste quer isolar (foco e
+    // so no comportamento UPDATE+ADD da Tabela 74, nao no preco unitario).
+    mockGetWakeProductBySku.mockResolvedValue({ precoPor: targetPrecoPor })
+
+    vi.useFakeTimers()
+    try {
+      const resultPromise = runSync({ kind: 'price', trigger: 'manual', dryRun: false })
+      await vi.runAllTimersAsync()
+      const result = await resultPromise
+
+      expect(mockUpdateWakePriceTableProducts).toHaveBeenCalledTimes(1)
+      expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(1)
+      expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledTimes(4)
+      for (const p of products) {
+        expect(mockReadWakePriceTableByVariantId).toHaveBeenCalledWith(Number(p.wakeProductVariantId), 74)
+      }
+
+      const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+      const tableItems = items.filter((i) => i.field === 'special_price')
+      expect(tableItems).toHaveLength(4)
+      expect(tableItems.every((i) => i.status === 'applied')).toBe(true)
+      expect(result.status).toBe('success')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -980,13 +1460,18 @@ describe('runSync -- dry-run consolidado: zero escritor Wake e lastApplied* into
     const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
     expect(items.every((i) => i.status === 'planned')).toBe(true)
 
+    // FASE D-PRE §3: dry-run agora faz UMA leitura read-only da Tabela 74 pra
+    // montar o preview -- e o item de special_price aparece no plano.
+    const tablePriceItem = items.find((i) => i.field === 'special_price')
+    expect(tablePriceItem?.status).toBe('planned')
+
     expect(mockUpdateWakePrices).not.toHaveBeenCalled()
     expect(mockUpdateWakeStock).not.toHaveBeenCalled()
     expect(mockGetWakeProductBySku).not.toHaveBeenCalled()
     expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
     expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
     expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
-    expect(mockGetWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(1)
 
     const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
     expect(state?.lastAppliedWakeUnitPrice).toBe(2)
@@ -1004,7 +1489,8 @@ describe('runSync -- idempotencia: segunda run com os mesmos dados de origem e n
     mockGetWakeProductBySku.mockResolvedValue({ precoPor: 3.6 })
     mockUpdateWakeStock.mockResolvedValue({ produtosAtualizados: [{ produtoVarianteId: variantId, resultado: true }], produtosNaoAtualizados: [] })
     mockReadWakeStockByVariantId.mockResolvedValue(20) // FASE C.1: releitura confirma o estoque enviado (2*100*10%)
-    mockGetWakePriceTableProducts.mockResolvedValueOnce([]).mockResolvedValueOnce([{ sku: 'SKU-IDEMPOTENT', precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 }])
+    mockGetWakePriceTableProducts.mockResolvedValueOnce([])
+    mockReadWakePriceTableByVariantId.mockResolvedValueOnce({ precoDe: moneyRound(3.6 * 1.3), precoPor: 3.6 })
 
     const firstRun = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
     expect(firstRun.status).toBe('success')

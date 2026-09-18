@@ -95,6 +95,20 @@ async function wakeRequest<T>(method: 'GET' | 'PUT' | 'POST', path: string, opti
         if (attempt >= MAX_RETRIES) throw new WakeTransientError(`Wake timeout em ${path}`)
         continue
       }
+      // FASE D-PRE §6 (achado independente do Tech Lead): antes, uma falha de
+      // rede REAL (DNS, conexao recusada, socket caiu no meio -- fetch()
+      // rejeita com TypeError nesses casos, nao com AbortError) subia direto
+      // pro chamador sem NENHUMA tentativa nova, mesmo sendo exatamente o
+      // tipo de falha transiente que o retry de 429/5xx/timeout ja existe pra
+      // absorver. Agora TypeError tenta de novo com backoff pequeno,
+      // respeitando o mesmo MAX_RETRIES -- WakePermanentError continua
+      // nunca sendo retentado (ja sobe direto no `if (err instanceof
+      // WakeClientError) throw err` acima, antes de chegar aqui).
+      if (err instanceof TypeError) {
+        if (attempt >= MAX_RETRIES) throw new WakeTransientError(`Falha de rede em ${path}: ${err.message}`)
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
+        continue
+      }
       throw err
     }
   }
@@ -194,18 +208,17 @@ function normalizeStockUpdateResponse(raw: unknown): WakeStockUpdateResponse {
  * (`resultado` + `detalhes` dentro de produtosAtualizados /
  * produtosNaoAtualizados).
  *
- * FASE C.1 (17/09/2026): esse ack sozinho NAO e mais suficiente pra marcar
- * 'applied' -- e sinal de que o Wake ACEITOU a chamada, nao de que o estado
- * remoto de fato ficou no valor esperado (regra canonica: "writer 2xx/ACK !=
- * estado remoto verificado"). syncStock() agora usa o ack so como triagem
- * (rejeitado no ack -> falha direto, sem gastar uma leitura) e, pro que foi
- * aceito, faz uma releitura REAL via readWakeStockByVariantId() antes de
- * confirmar 'applied'. Ate 17/09/2026 o codigo achava que `GET /produtos/{sku}`
- * (unico endpoint testado na epoca) era a unica forma de reler estoque, e
- * como ele sempre devolve `estoque: []`, a reconferencia por leitura parecia
- * impossivel -- daí o ack-only. readWakeStockByVariantId() usa outro
- * endpoint (`GET /produtos`, listagem/catalogo) que de fato devolve
- * `estoque[]` quando `camposAdicionais=Estoque` e pedido (ver comentario la).
+ * FASE C.2: esse ack sozinho NAO e suficiente pra marcar 'applied' -- e sinal
+ * de que o Wake ACEITOU a chamada, nao de que o estado remoto de fato ficou
+ * no valor esperado (regra canonica: "writer 2xx/ACK != estado remoto
+ * verificado"). syncStock() usa o ack so como triagem (rejeitado no ack ->
+ * falha direto, sem gastar uma leitura) e, pro que foi aceito, faz uma
+ * releitura REAL via readWakeStockByVariantId() antes de confirmar
+ * 'applied'. readWakeStockByVariantId() usa o endpoint dedicado
+ * `GET /produtos/{identificador}/estoque` (ver comentario dele mais abaixo),
+ * que devolve o estoque por centro de distribuicao de verdade -- diferente
+ * de `GET /produtos/{sku}`, que sempre devolve `estoque: []` e por isso nunca
+ * serviu pra reconferencia.
  */
 export async function updateWakeStock(items: WakeStockUpdateItem[]): Promise<WakeStockUpdateResponse> {
   if (items.length > 50) throw new Error('updateWakeStock: lote maior que 50 -- particione antes de chamar')
@@ -495,4 +508,78 @@ export async function readWakeStockByVariantId(variantId: number, cdId: number):
   const entry = list.find((e) => e.centroDistribuicaoId === cdId)
   if (!entry || typeof entry.estoqueFisico !== 'number' || !Number.isFinite(entry.estoqueFisico)) return null
   return entry.estoqueFisico
+}
+
+/** Uma entrada de `tabelasPreco[]` no corpo de GET /produtos/{identificador}?camposAdicionais=TabelaPreco. */
+interface WakeProductTabelaPrecoEntry {
+  tabelaPrecoId?: number
+  nome?: string
+  precoDe?: number
+  precoPor?: number
+  [key: string]: unknown
+}
+
+interface WakeProductWithTabelasPrecoResponse {
+  tabelasPreco?: WakeProductTabelaPrecoEntry[]
+  [key: string]: unknown
+}
+
+/**
+ * GET /produtos/{identificador}?tipoIdentificador=ProdutoVarianteId&camposAdicionais=TabelaPreco --
+ * leitura pontual direcionada de uma Tabela de Preco especifica pra 1
+ * produto, criada na revisao do Tech Lead do PR #4 (fix #4, 2026-09-18)
+ * pra substituir a segunda releitura paginada da Tabela 74 inteira em
+ * syncPrices() (src/lib/sync/engine.ts). Endpoint e schema confirmados na
+ * doc oficial Wake:
+ *   - https://wakecommerce.readme.io/reference/retorna-um-produto-buscando-pelo-seu-identificador
+ *   - https://wakecommerce.readme.io/docs/consultando-um-produto-especifico
+ * `camposAdicionais=TabelaPreco` inclui `tabelasPreco[]` no corpo, cada
+ * entrada com `tabelaPrecoId`/`precoDe`/`precoPor`. Reaproveita
+ * wakeRequest() -- mesmo auth/retry/backoff/timeout/rate-limit/error-
+ * handling de todo o cliente Wake, nenhum cliente HTTP paralelo (mesmo
+ * padrao de readWakeStockByVariantId() acima).
+ *
+ * Selecao da tabela: estritamente `tabelasPreco.find(t => t.tabelaPrecoId
+ * === tableId)`. NUNCA usa outra tabela como fallback, mesmo que so exista
+ * uma entrada na lista -- um produto pode estar associado a mais de uma
+ * Tabela de Preco.
+ *
+ * Retorna `null` pra qualquer caso NAO verificavel, nunca aceitando
+ * silenciosamente um valor incerto:
+ *   - 404/422 (produto/variante "nao encontrado" -- mesmo tratamento de
+ *     business-not-found que getWakeProductBySku() ja aplica pro mesmo
+ *     endpoint, revisao Tech Lead PR #4, final polish, item 2);
+ *   - campo `tabelasPreco` ausente/nao-array;
+ *   - nenhuma entrada da lista com `tabelaPrecoId === tableId`;
+ *   - `precoDe`/`precoPor` da entrada ausente, nao-numerico ou nao-finito.
+ * Demais erros permanentes (WakePermanentError fora de 404/422) e erros
+ * transientes propagam pro chamador -- quem chama trata esse throw como
+ * FAILED, nunca como MISMATCH (mesmo criterio de readWakeStockByVariantId).
+ *
+ * Chamador responsavel por serializar/pacear as chamadas (ex.:
+ * WAKE_VERIFY_DELAY_MS em engine.ts) -- esta funcao nao faz rate limiting
+ * proprio, so uma chamada por invocacao.
+ */
+export async function readWakePriceTableByVariantId(variantId: number, tableId: number): Promise<{ precoDe: number; precoPor: number } | null> {
+  let response: WakeProductWithTabelasPrecoResponse
+  try {
+    response = await wakeRequest<WakeProductWithTabelasPrecoResponse>('GET', `/produtos/${variantId}`, {
+      params: { tipoIdentificador: 'ProdutoVarianteId', camposAdicionais: 'TabelaPreco' },
+    })
+  } catch (err) {
+    // 404 e 422 ("produto nao encontrado") sao tratados como o mesmo caso de
+    // negocio aqui: mesmo endpoint (/produtos/{id}) que getWakeProductBySku
+    // ja trata assim acima -- consistencia de contrato, nao suposicao nova.
+    if (err instanceof WakePermanentError && /\b(404|422)\b/.test(err.message)) return null
+    throw err
+  }
+
+  const list = response?.tabelasPreco
+  if (!Array.isArray(list)) return null
+
+  const entry = list.find((t) => t.tabelaPrecoId === tableId)
+  if (!entry || typeof entry.precoDe !== 'number' || !Number.isFinite(entry.precoDe) || typeof entry.precoPor !== 'number' || !Number.isFinite(entry.precoPor)) {
+    return null
+  }
+  return { precoDe: entry.precoDe, precoPor: entry.precoPor }
 }

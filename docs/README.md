@@ -46,10 +46,17 @@ Ver `src/lib/settings.ts` (`REQUIRED_UNCONFIRMED_KEYS`) e a tela
 Configurações -- nenhum desses é inventado, todos ficam bloqueando
 sincronização real (não dry-run) até serem preenchidos:
 
-- `WAKE_CD_ID`, `WAKE_STOCK_CONTROL_MODE`, `WAKE_PRICE_TABLE_ID`,
-  `WAKE_PROMOTION_ID` -- precisam do admin do Wake.
-- `CSV_IDENTIFIER_TYPE` -- decisão de qual identificador (SKU ou ID
-  interno) usar nas chamadas de escrita do Wake.
+- `WAKE_CD_ID`, `WAKE_STOCK_CONTROL_MODE` (precisa ser exatamente
+  `fstore`|`erp`, validado no servidor -- ver `SETTING_ENUM_RANGES` em
+  `src/lib/settings.ts`), `WAKE_PRICE_TABLE_ID`, `WAKE_PROMOTION_ID` --
+  precisam do admin do Wake.
+
+`CSV_IDENTIFIER_TYPE` NÃO está mais nessa lista (revisão Tech Lead PR #4,
+fix #3): auditoria no código (grep em `src/`) confirmou que nenhum
+consumidor lê essa setting -- o `tipoIdentificador` enviado ao Wake em cada
+chamada de escrita é sempre um literal hardcoded em `src/lib/wake/client.ts`,
+nunca lido de configuração. Removida de `REQUIRED_UNCONFIRMED_KEYS`, da tela
+Configurações e do schema do banco.
 
 `CISS_STOCK_ENTERPRISE`/`CISS_STOCK_LOCATION` NÃO estão mais nessa lista:
 já têm default real (empresa=2, local=5 = "ESTOQUE CD"), confirmado por
