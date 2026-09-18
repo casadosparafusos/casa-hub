@@ -785,6 +785,66 @@ describe('runSync -- read-after-write da Tabela de Preco 74 (FASE C §9)', () =>
     expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(2)
     expect(result.status).toBe('success')
   })
+
+  it('FASE D-PRE §2: >100 entradas na Tabela 74 e >50 alteracoes em varios lotes de escrita -- releituras ficam em no maximo 2 (1 diff + 1 verify final), nunca crescendo com o numero de lotes', async () => {
+    // Reproduz o achado do Tech Lead: com P paginas na tabela e B lotes de
+    // escrita, o codigo antigo fazia P*(1+B) leituras. Aqui P=3 (110
+    // entradas, PAGE_SIZE=50 -> paginas 50/50/10) e B=3 (110 alteracoes,
+    // WAKE_BATCH_SIZE=50 -> lotes 50/50/10). Sob o bug antigo isso seria
+    // 3*(1+3)=12 chamadas a getWakePriceTableProducts; sob o fix, exatamente
+    // 3 (diff) + 3 (verify final) = 6, independente de B.
+    const priceResult = actualCalculateUnitPrice({ unitRaw: 'CT', cissPrice: 300 })
+    if (!priceResult.ok) throw new Error('fixture invalida: CT deveria resolver como FIXADOR_CENTO')
+    const targetPrecoPor = priceResult.retailPrice
+    const targetPrecoDe = moneyRound(targetPrecoPor * 1.3)
+
+    const CHANGED_COUNT = 110
+    const products = await Promise.all(Array.from({ length: CHANGED_COUNT }, (_, i) => insertProduct({ wakeSku: `SKU-T74-BULK-${i + 1}` })))
+    // Preco unitario ja aplicado e identico ao alvo -- prioriza isolar o
+    // teste na Tabela 74 (evita os 110 sleeps de WAKE_VERIFY_DELAY_MS do
+    // caminho de preco unitario, que nao e o que este teste audita).
+    for (const product of products) {
+      await db.insert(schema.syncProductState).values({
+        managedProductId: product.id,
+        lastAppliedWakeUnitPrice: targetPrecoPor,
+        lastAppliedWakeSpecialPrice: priceResult.expectedWholesalePrice,
+      })
+    }
+    mockGetRetailPrices.mockResolvedValue(new Map(products.map((p) => [p.cissProductId, 300])))
+    mockFetchStockForProducts.mockResolvedValue(products.map((p) => ({ productId: p.cissProductId, stock: 2, unitRaw: 'CT' })))
+
+    const otherEntries = (start: number, count: number) => Array.from({ length: count }, (_, i) => ({ sku: `SKU-OTHER-${start + i}`, precoDe: 10, precoPor: 7.5 }))
+    const writtenEntries = (start: number, count: number) => products.slice(start, start + count).map((p) => ({ sku: p.wakeSku, precoDe: targetPrecoDe, precoPor: targetPrecoPor }))
+
+    mockGetWakePriceTableProducts
+      // Leitura inicial (diff, topo de syncPrices): tabela com 110 entradas
+      // ALHEIAS (nenhuma bate com os SKUs deste teste) -- paginada em 3
+      // chamadas (50+50+10).
+      .mockResolvedValueOnce(otherEntries(1, 50))
+      .mockResolvedValueOnce(otherEntries(51, 50))
+      .mockResolvedValueOnce(otherEntries(101, 10))
+      // Verificacao final UNICA (pos-escrita de TODOS os 3 lotes) -- confirma
+      // os 110 produtos escritos, tambem em 3 paginas.
+      .mockResolvedValueOnce(writtenEntries(0, 50))
+      .mockResolvedValueOnce(writtenEntries(50, 50))
+      .mockResolvedValueOnce(writtenEntries(100, 10))
+
+    const result = await runSync({ kind: 'price', trigger: 'manual', dryRun: false })
+
+    expect(result.status).toBe('success')
+    // 3 lotes de escrita de fato ocorreram (50+50+10) -- confirma que o
+    // cenario testado tem B=3, nao B=1.
+    expect(mockAddWakePriceTableProducts).toHaveBeenCalledTimes(3)
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+    // O numero de leituras NAO cresce com B: fica em 6 (2 leituras completas
+    // * 3 paginas), nunca 12 (o que o bug antigo geraria aqui).
+    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(6)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    const tableItems = items.filter((i) => i.field === 'special_price')
+    expect(tableItems).toHaveLength(CHANGED_COUNT)
+    expect(tableItems.every((i) => i.status === 'applied')).toBe(true)
+  })
 })
 
 describe('runSync -- distincao VERIFIED/MISMATCH/FAILED na reconferencia de estoque (FASE C.1 §2/§4/§5 -- BLOQUEIO PRINCIPAL da revisao do PR #3)', () => {
@@ -980,13 +1040,18 @@ describe('runSync -- dry-run consolidado: zero escritor Wake e lastApplied* into
     const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
     expect(items.every((i) => i.status === 'planned')).toBe(true)
 
+    // FASE D-PRE §3: dry-run agora faz UMA leitura read-only da Tabela 74 pra
+    // montar o preview -- e o item de special_price aparece no plano.
+    const tablePriceItem = items.find((i) => i.field === 'special_price')
+    expect(tablePriceItem?.status).toBe('planned')
+
     expect(mockUpdateWakePrices).not.toHaveBeenCalled()
     expect(mockUpdateWakeStock).not.toHaveBeenCalled()
     expect(mockGetWakeProductBySku).not.toHaveBeenCalled()
     expect(mockReadWakeStockByVariantId).not.toHaveBeenCalled()
     expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
     expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
-    expect(mockGetWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockGetWakePriceTableProducts).toHaveBeenCalledTimes(1)
 
     const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
     expect(state?.lastAppliedWakeUnitPrice).toBe(2)
