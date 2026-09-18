@@ -5,7 +5,7 @@ import { withLocks, LockUnavailableError } from './lock'
 import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource, validateSettingValue, validateEnumSettingValue } from '../settings'
 import { calculateUnitPrice } from '../pricing/engine'
 import { calculateUnitStock } from '../inventory/engine'
-import { moneyRound, type CommercialPolicyConfig } from '../units'
+import { moneyRound, type CommercialPolicyConfig, type PackageSaleUnitConfig } from '../units'
 import { getActivePriceProvider } from '../ciss/price-provider'
 import { fetchStockForProducts, type CissStockRow } from '../ciss/stock'
 import {
@@ -181,7 +181,7 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
       .select()
       .from(schema.productSaleUnitConfig)
       .where(eq(schema.productSaleUnitConfig.active, true))
-    const packageConfigs = new Map(packageConfigRows.map((r) => [r.managedProductId, { quantityPerSaleUnit: r.quantityPerSaleUnit }]))
+    const packageConfigs = new Map(packageConfigRows.map((r) => [r.managedProductId, { sourceUnit: r.sourceUnit, quantityPerSaleUnit: r.quantityPerSaleUnit }]))
 
     // FASE B.1 (PROBLEMA 1) -- ponte settings -> CommercialPolicyConfig,
     // lida UMA vez por run e injetada em syncPrices()/syncStock() (que por
@@ -297,7 +297,7 @@ async function syncPrices(
   products: ManagedProduct[],
   dryRun: boolean,
   stockByProduct: Map<string, CissStockRow>,
-  packageConfigs: Map<number, { quantityPerSaleUnit: number }>,
+  packageConfigs: Map<number, PackageSaleUnitConfig>,
   commercialPolicyConfig: CommercialPolicyConfig,
 ) {
   let changed = 0, applied = 0, skipped = 0, failed = 0
@@ -739,7 +739,7 @@ async function syncStock(
   products: ManagedProduct[],
   dryRun: boolean,
   stockByProduct: Map<string, CissStockRow>,
-  packageConfigs: Map<number, { quantityPerSaleUnit: number }>,
+  packageConfigs: Map<number, PackageSaleUnitConfig>,
   commercialPolicyConfig: CommercialPolicyConfig,
 ) {
   let changed = 0, applied = 0, skipped = 0, failed = 0

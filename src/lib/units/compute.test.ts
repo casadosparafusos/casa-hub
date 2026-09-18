@@ -97,13 +97,44 @@ describe('computeUnit -- KG/MT sem configuracao', () => {
   })
 
   it('KG com packageConfig valido -> ok', () => {
-    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageConfig: { quantityPerSaleUnit: 18 } })
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageConfig: { sourceUnit: 'KG', quantityPerSaleUnit: 18 } })
     expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', policy: 'NONE', salePrice: 180, saleStock: 18, remainder: 16 })
   })
 
   it('MT com packageConfig valido -> ok (37m / 2.5 = 14, sobra 2m)', () => {
-    const r = computeUnit({ unitRaw: 'MT', cissPrice: 8, cissStock: 37, packageConfig: { quantityPerSaleUnit: 2.5 } })
+    const r = computeUnit({ unitRaw: 'MT', cissPrice: 8, cissStock: 37, packageConfig: { sourceUnit: 'MT', quantityPerSaleUnit: 2.5 } })
     expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', policy: 'NONE', salePrice: 20, saleStock: 14, remainder: 2 })
+  })
+})
+
+// Tech Lead review PR #5, achado #1 (P1 CRITICO): o motor puro ignorava
+// source_unit e usava quantityPerSaleUnit mesmo quando a UNIT real do CISS
+// mudou desde que a config foi cadastrada. Fail-closed nos dois sentidos.
+describe('computeUnit -- KG/MT com config cadastrada para UNIT diferente da UNIT atual do CISS', () => {
+  it('CISS MT + config cadastrada para KG -> CONFIGURATION_REQUIRED (nunca usa config de outra UNIT)', () => {
+    const r = computeUnit({ unitRaw: 'MT', cissPrice: 10, cissStock: 50, packageConfig: { sourceUnit: 'KG', quantityPerSaleUnit: 5 } })
+    expect(r).toMatchObject({ ok: false, reason: 'CONFIGURATION_REQUIRED' })
+    if (r.ok) throw new Error('unreachable')
+    expect(r.detail).toContain('KG')
+    expect(r.detail).toContain('MT')
+  })
+
+  it('CISS KG + config cadastrada para MT -> CONFIGURATION_REQUIRED (nunca usa config de outra UNIT)', () => {
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageConfig: { sourceUnit: 'MT', quantityPerSaleUnit: 18 } })
+    expect(r).toMatchObject({ ok: false, reason: 'CONFIGURATION_REQUIRED' })
+    if (r.ok) throw new Error('unreachable')
+    expect(r.detail).toContain('MT')
+    expect(r.detail).toContain('KG')
+  })
+
+  it('CISS KG + config cadastrada para KG -> ok (mesma UNIT, usa a config)', () => {
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: 340, packageConfig: { sourceUnit: 'KG', quantityPerSaleUnit: 18 } })
+    expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', salePrice: 180, saleStock: 18 })
+  })
+
+  it('CISS MT + config cadastrada para MT -> ok (mesma UNIT, usa a config)', () => {
+    const r = computeUnit({ unitRaw: 'MT', cissPrice: 8, cissStock: 37, packageConfig: { sourceUnit: 'MT', quantityPerSaleUnit: 2.5 } })
+    expect(r).toMatchObject({ ok: true, unitClass: 'PACKAGE_MEASURED', salePrice: 20, saleStock: 14 })
   })
 })
 
@@ -131,7 +162,7 @@ describe('computeUnit -- seguranca de estoque negativo', () => {
   })
 
   it('PACKAGE_MEASURED com estoque negativo nunca resulta em saleStock negativo', () => {
-    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: -1, packageConfig: { quantityPerSaleUnit: 18 } })
+    const r = computeUnit({ unitRaw: 'KG', cissPrice: 10, cissStock: -1, packageConfig: { sourceUnit: 'KG', quantityPerSaleUnit: 18 } })
     expect(r).toMatchObject({ ok: true, saleStock: 0 })
   })
 })

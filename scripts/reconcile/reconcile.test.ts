@@ -148,7 +148,7 @@ describe('reconcileProduct', () => {
 
   it('KG com embalagem = compara pela caixa', () => {
     const input = baseInput([p])
-    input.packageWeights.set('100', 5)
+    input.packageWeights.set('100', { sourceUnit: 'KG', quantityPerSaleUnit: 5 })
     input.cissPrices!.set('100', 30)
     input.cissStock!.set('100', stock('100', 'KG', 12.5))
     input.wakeProducts!.set(p.wakeSku, wake(p, 150, 2))
@@ -162,6 +162,16 @@ describe('reconcileProduct', () => {
     input.cissStock!.set('100', stock('100', 'MT', 50))
     const r = reconcileProduct(p, input)
     expect(r.status).toBe('CONFIGURATION_REQUIRED')
+  })
+
+  it('CISS MT com config cadastrada para KG = CONFIGURATION_REQUIRED (fail-closed, nunca usa a config errada)', () => {
+    const input = baseInput([p])
+    input.packageWeights.set('100', { sourceUnit: 'KG', quantityPerSaleUnit: 5 })
+    input.cissPrices!.set('100', 10)
+    input.cissStock!.set('100', stock('100', 'MT', 50))
+    const r = reconcileProduct(p, input)
+    expect(r.status).toBe('CONFIGURATION_REQUIRED')
+    expect(r.expected_retail_price).toBeNull()
   })
 
   it('unit desconhecida = UNSUPPORTED_UNIT', () => {

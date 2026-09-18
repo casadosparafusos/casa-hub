@@ -293,6 +293,75 @@ describe('runSync -- integracao com UnitStrategies (§13/§14/§16)', () => {
     expect(state?.unitResolutionStatus).toBe('OK')
   })
 
+  // FASE E §13 (PROVA END-TO-END): reproduz o exemplo canonico do documento
+  // ponta a ponta -- UNIT=KG, quantity_per_sale_unit=18, preco CISS=R$12/KG,
+  // estoque CISS=180KG -> preco Wake=216, estoque Wake=10. O teste "com config
+  // ativa" acima ja prova o mesmo mecanismo com outros numeros; este usa os
+  // numeros exatos do doc pra deixar a prova rastreavel ao FASE E.
+  it('PACKAGE_MEASURED (KG) com exemplo canonico do FASE E: 18kg/R$12/180kg -> R$216/10 unidades', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-FASE-E-CANONICO' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'KG',
+      quantityPerSaleUnit: 18,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 12]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 180, unitRaw: 'KG' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.failedProducts).toBe(0)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    expect(items.find((i) => i.field === 'unit_price')?.targetNewValue).toBe(216) // 12 * 18
+    expect(items.find((i) => i.field === 'stock')?.targetNewValue).toBe(10) // floor(180/18)
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.unitClass).toBe('PACKAGE_MEASURED')
+    expect(state?.unitResolutionStatus).toBe('OK')
+  })
+
+  it('PACKAGE_MEASURED (KG) com resto: estoque nao multiplo da quantidade descarta o resto (floor)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-FASE-E-RESTO' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'KG',
+      quantityPerSaleUnit: 18,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 12]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 181, unitRaw: 'KG' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.failedProducts).toBe(0)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    expect(items.find((i) => i.field === 'stock')?.targetNewValue).toBe(10) // floor(181/18) = 10, resto 1kg nunca vira unidade
+  })
+
+  it('PACKAGE_MEASURED (MT) com quantidade decimal: mesma multiplicacao/divisao do KG, UNIT sempre lida do CISS', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-FASE-E-MT-DECIMAL' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'MT',
+      quantityPerSaleUnit: 12.5,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 8]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 100, unitRaw: 'MT' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.failedProducts).toBe(0)
+
+    const items = await db.select().from(schema.syncRunItems).where(eq(schema.syncRunItems.syncRunId, result.syncRunId))
+    expect(items.find((i) => i.field === 'unit_price')?.targetNewValue).toBe(100) // 8 * 12.5
+    expect(items.find((i) => i.field === 'stock')?.targetNewValue).toBe(8) // floor(100/12.5)
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.unitClass).toBe('PACKAGE_MEASURED')
+    expect(state?.unitResolutionStatus).toBe('OK')
+  })
+
   it('UNIT desconhecida (XYZ): falha fail-closed com UNSUPPORTED_UNIT, nunca assume DIRECT', async () => {
     const product = await insertProduct({ wakeSku: 'SKU-XYZ' })
     mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
@@ -385,6 +454,61 @@ describe('runSync -- isolamento do escritor Wake real (FASE B.1, PROBLEMA 3)', (
     expect(result.failedProducts).toBe(2) // preco + estoque
     expect(result.appliedProducts).toBe(0)
     expect(result.status).toBe('failed')
+
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+
+  // Tech Lead review PR #5, achado #1 (P1 CRITICO): config cadastrada para
+  // KG mas o CISS agora responde MT (ou vice-versa) -- antes do fix, o motor
+  // ignorava source_unit e continuava usando a quantidade cadastrada como se
+  // a UNIT nao tivesse mudado. Precisa falhar fechado, igual ao caso "sem
+  // config" acima.
+  it('PACKAGE_MEASURED com config cadastrada para KG mas CISS responde MT, escrita real: zero chamada a qualquer escritor Wake (fail-closed, nunca usa config de outra UNIT)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-KG-CFG-MT-MISMATCH' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'KG',
+      quantityPerSaleUnit: 5,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 10]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 17, unitRaw: 'MT' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: false })
+
+    expect(result.failedProducts).toBe(2) // preco + estoque
+    expect(result.appliedProducts).toBe(0)
+    expect(result.status).toBe('failed')
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.unitResolutionStatus).toBe('CONFIGURATION_REQUIRED')
+
+    expect(mockUpdateWakePrices).not.toHaveBeenCalled()
+    expect(mockUpdateWakeStock).not.toHaveBeenCalled()
+    expect(mockAddWakePriceTableProducts).not.toHaveBeenCalled()
+    expect(mockUpdateWakePriceTableProducts).not.toHaveBeenCalled()
+  })
+
+  it('PACKAGE_MEASURED com config cadastrada para MT mas CISS responde KG, dry-run: zero item planned=ok, CONFIGURATION_REQUIRED persistido (fail-closed nos dois sentidos)', async () => {
+    const product = await insertProduct({ wakeSku: 'SKU-MT-CFG-KG-MISMATCH' })
+    await db.insert(schema.productSaleUnitConfig).values({
+      managedProductId: product.id,
+      sourceUnit: 'MT',
+      quantityPerSaleUnit: 12.5,
+      active: true,
+    })
+    mockGetRetailPrices.mockResolvedValue(new Map([[product.cissProductId, 8]]))
+    mockFetchStockForProducts.mockResolvedValue([{ productId: product.cissProductId, stock: 100, unitRaw: 'KG' }])
+
+    const result = await runSync({ kind: 'both', trigger: 'manual', dryRun: true })
+    expect(result.failedProducts).toBe(2)
+    expect(result.appliedProducts).toBe(0)
+
+    const state = await db.select().from(schema.syncProductState).where(eq(schema.syncProductState.managedProductId, product.id)).get()
+    expect(state?.unitResolutionStatus).toBe('CONFIGURATION_REQUIRED')
 
     expect(mockUpdateWakePrices).not.toHaveBeenCalled()
     expect(mockUpdateWakeStock).not.toHaveBeenCalled()

@@ -82,6 +82,15 @@ export function computeUnit(input: ComputeUnitInput): UnitComputationResult {
     }
 
     case 'PACKAGE_MEASURED': {
+      if (input.packageConfig && input.packageConfig.sourceUnit !== resolution.sourceUnit) {
+        return {
+          ok: false,
+          unitRaw: resolution.unitRaw,
+          unitNormalized: resolution.unitNormalized,
+          reason: 'CONFIGURATION_REQUIRED',
+          detail: `Configuracao cadastrada para UNIT ${input.packageConfig.sourceUnit} incompativel com UNIT atual do CISS ${resolution.sourceUnit}`,
+        }
+      }
       const outcome = computeMeasuredPackage(input.cissPrice, input.cissStock, input.packageConfig?.quantityPerSaleUnit)
       if (!outcome.ok) {
         return {

@@ -140,6 +140,63 @@ export const productSaleUnitConfig = sqliteTable(
 )
 
 /**
+ * Historico/auditoria de mudancas em product_sale_unit_config (FASE E, §12).
+ * A tabela de config so guarda o estado ATUAL (updated_by/updated_at) -- esta
+ * grava cada evento (criacao/atualizacao/desativacao/reativacao) separado,
+ * incluindo os valores antigo/novo e a origem (manual na tela ou import por
+ * planilha). NAO reaproveita `imports` (aquela e especifica do CSV de
+ * whitelist, semantica diferente) e NUNCA guarda o arquivo inteiro -- so o
+ * nome, quando vier de import.
+ */
+export const productSaleUnitConfigEvents = sqliteTable(
+  'product_sale_unit_config_events',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    managedProductId: integer('managed_product_id')
+      .notNull()
+      .references(() => managedProducts.id),
+    action: text('action', { enum: ['CREATE', 'UPDATE', 'DEACTIVATE', 'REACTIVATE'] }).notNull(),
+    sourceUnit: text('source_unit', { enum: ['KG', 'MT'] }).notNull(),
+    oldQuantityPerSaleUnit: real('old_quantity_per_sale_unit'),
+    newQuantityPerSaleUnit: real('new_quantity_per_sale_unit'),
+    actor: text('actor').notNull(),
+    origin: text('origin', { enum: ['MANUAL', 'IMPORT'] }).notNull(),
+    filename: text('filename'),
+    createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => ({
+    managedProductIdIdx: index('product_sale_unit_config_events_managed_product_id_idx').on(t.managedProductId),
+    createdAtIdx: index('product_sale_unit_config_events_created_at_idx').on(t.createdAt),
+    // Tech Lead review PR #5, achado #8: mesmo bloqueio A/B de
+    // product_sale_unit_config (enum/quantidade so em TS, sem CHECK no SQL)
+    // se aplicava aqui -- uma insercao direta (fora do Drizzle) podia gravar
+    // action/origin/source_unit fora do enum, ou quantidade <= 0.
+    actionCheck: check('product_sale_unit_config_events_action_check', sql`${t.action} IN ('CREATE', 'UPDATE', 'DEACTIVATE', 'REACTIVATE')`),
+    originCheck: check('product_sale_unit_config_events_origin_check', sql`${t.origin} IN ('MANUAL', 'IMPORT')`),
+    sourceUnitCheck: check('product_sale_unit_config_events_source_unit_check', sql`${t.sourceUnit} IN ('KG', 'MT')`),
+    oldQuantityPositiveCheck: check(
+      'product_sale_unit_config_events_old_quantity_positive_check',
+      sql`${t.oldQuantityPerSaleUnit} IS NULL OR ${t.oldQuantityPerSaleUnit} > 0`,
+    ),
+    newQuantityPositiveCheck: check(
+      'product_sale_unit_config_events_new_quantity_positive_check',
+      sql`${t.newQuantityPerSaleUnit} IS NULL OR ${t.newQuantityPerSaleUnit} > 0`,
+    ),
+    // CREATE/REACTIVATE partem de "nao existia" (old=NULL, new preenchido);
+    // DEACTIVATE termina em "nao existe mais" (old preenchido, new=NULL);
+    // UPDATE tem os dois preenchidos (ver src/lib/measured-packages/service.ts).
+    actionQuantityShapeCheck: check(
+      'product_sale_unit_config_events_action_quantity_shape_check',
+      sql`
+        (${t.action} IN ('CREATE', 'REACTIVATE') AND ${t.oldQuantityPerSaleUnit} IS NULL AND ${t.newQuantityPerSaleUnit} IS NOT NULL) OR
+        (${t.action} = 'DEACTIVATE' AND ${t.oldQuantityPerSaleUnit} IS NOT NULL AND ${t.newQuantityPerSaleUnit} IS NULL) OR
+        (${t.action} = 'UPDATE' AND ${t.oldQuantityPerSaleUnit} IS NOT NULL AND ${t.newQuantityPerSaleUnit} IS NOT NULL)
+      `,
+    ),
+  }),
+)
+
+/**
  * Uma linha por execucao do motor de sincronizacao -- manual (web) ou
  * agendada (worker), incluindo a reconciliacao diaria. dry_run=1 nunca
  * escreve no Wake, soh calcula e registra o que faria.
