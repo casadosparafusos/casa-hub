@@ -546,12 +546,14 @@ interface WakeProductWithTabelasPrecoResponse {
  *
  * Retorna `null` pra qualquer caso NAO verificavel, nunca aceitando
  * silenciosamente um valor incerto:
- *   - 404 (produto/variante nao encontrado);
+ *   - 404/422 (produto/variante "nao encontrado" -- mesmo tratamento de
+ *     business-not-found que getWakeProductBySku() ja aplica pro mesmo
+ *     endpoint, revisao Tech Lead PR #4, final polish, item 2);
  *   - campo `tabelasPreco` ausente/nao-array;
  *   - nenhuma entrada da lista com `tabelaPrecoId === tableId`;
  *   - `precoDe`/`precoPor` da entrada ausente, nao-numerico ou nao-finito.
- * Erro de rede/protocolo (WakeClientError transiente ou permanente que nao
- * seja 404) propaga pro chamador -- quem chama trata esse throw como
+ * Demais erros permanentes (WakePermanentError fora de 404/422) e erros
+ * transientes propagam pro chamador -- quem chama trata esse throw como
  * FAILED, nunca como MISMATCH (mesmo criterio de readWakeStockByVariantId).
  *
  * Chamador responsavel por serializar/pacear as chamadas (ex.:
