@@ -2,7 +2,7 @@ import 'server-only'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db'
 import { withLocks, LockUnavailableError } from './lock'
-import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource, validateSettingValue } from '../settings'
+import { checkRequiredUnconfirmed, getCommercialPolicyConfig, stockSource, validateSettingValue, validateEnumSettingValue } from '../settings'
 import { calculateUnitPrice } from '../pricing/engine'
 import { calculateUnitStock } from '../inventory/engine'
 import { moneyRound, type CommercialPolicyConfig } from '../units'
@@ -22,7 +22,6 @@ import {
   type WakeStockUpdateItem,
   type WakeStockUpdateResponse,
   type WakeStockUpdateResultEntry,
-  type WakePriceTableProductItem,
 } from '../wake/client'
 
 // -----------------------------------------------------------------------
@@ -121,12 +120,35 @@ async function runSyncLocked(options: RunSyncOptions): Promise<RunSyncResult> {
       )
     }
 
-    const { missing } = await checkRequiredUnconfirmed()
+    const { values, missing } = await checkRequiredUnconfirmed()
     if (missing.length > 0) {
       throw new Error(
         `Sincronizacao real recusada -- configuracoes obrigatorias ainda nao confirmadas: ${missing.join(', ')}. ` +
           `Preencha em Configuracoes ou rode em modo dry-run.`,
       )
+    }
+
+    // Revisao Tech Lead PR #4, revisao final #2, item 1: WAKE_STOCK_CONTROL_MODE
+    // e uma setting de 2 valores validos (fstore|erp, ver SETTING_ENUM_RANGES em
+    // ../settings), mas "valor valido" e "modo suportado pra escrita real de
+    // estoque" NAO sao a mesma coisa. `erp` e um estado real possivel da conta
+    // Wake (a integracao trataria a baixa por evento/pedido do lado do ERP) --
+    // porem esse fluxo ainda NAO existe no Casa HUB. Sem este guard,
+    // checkRequiredUnconfirmed() acima aceitava `erp` (valor valido) e deixava
+    // uma sync real de estoque prosseguir como se o fluxo correspondente
+    // existisse. Bloqueio e so pra ESCREVER estoque de verdade: dryRun=true
+    // continua liberado em qualquer modo (so calcula/planeja, nunca escreve),
+    // e kind='price' nunca passa por aqui (nao mexe em estoque).
+    if (kind === 'stock' || kind === 'both') {
+      const stockControlMode = validateEnumSettingValue('WAKE_STOCK_CONTROL_MODE', values.WAKE_STOCK_CONTROL_MODE ?? '')
+      if (stockControlMode === 'erp') {
+        throw new Error(
+          'WAKE_STOCK_CONTROL_MODE_UNSUPPORTED_FOR_REAL_STOCK_SYNC: WAKE_STOCK_CONTROL_MODE=erp e um valor registravel, ' +
+            'mas o Casa HUB ainda nao implementa o fluxo de baixa de estoque por evento/pedido do ERP -- escrita real de ' +
+            'estoque (kind=stock|both) fica bloqueada ate esse fluxo existir. Use WAKE_STOCK_CONTROL_MODE=fstore, ' +
+            'rode com dryRun=true, ou use kind=price.',
+        )
+      }
     }
   }
 
@@ -552,35 +574,65 @@ async function syncPrices(
   // unitario acima (endpoints diferentes do Wake; um falhar nao desfaz o
   // outro). So roda fora de dry-run e com WAKE_PRICE_TABLE_ID configurado.
   if (!dryRun && priceTableId !== null && toApplyTablePrice.length > 0) {
-    // FASE D-PRE §2 (achado independente do Tech Lead): antes, cada lote de
-    // escrita disparava sua PROPRIA releitura paginada da Tabela 74 inteira
-    // (fetchPriceTableEntries dentro deste for) -- com P paginas na tabela e
-    // B lotes de escrita, o total de GETs pos-escrita crescia como P*B (mais
-    // a leitura inicial do diff), o suficiente pra estourar o rate limit do
-    // Wake (120 req/min, 5x 429 seguidos trava o token por 1h -- ver
-    // docs/WAKE-API-CONTRATOS.md) quando muitos produtos mudam de uma vez.
-    // Agora TODOS os lotes sao escritos primeiro (sem reler entre eles) e
-    // so DEPOIS roda uma UNICA releitura paginada cobrindo todos os itens
-    // escritos com sucesso -- total de leituras por run fica em no maximo
-    // 2 (1 diff no topo da funcao + 1 verificacao final), nunca crescendo
-    // com o numero de lotes. Ver teste dedicado (>100 entradas na tabela,
-    // >50 alteracoes) que prova essa formula.
+    // Historico: ate a auditoria da FASE D-PRE (revisao Tech Lead #1), cada
+    // lote de escrita disparava sua PROPRIA releitura paginada da Tabela 74
+    // inteira (fetchPriceTableEntries dentro deste for) -- com P paginas na
+    // tabela e B lotes de escrita, o total de GETs pos-escrita crescia como
+    // P*B, o suficiente pra estourar o rate limit do Wake (120 req/min, 5x
+    // 429 seguidos trava o token por 1h -- ver docs/WAKE-API-CONTRATOS.md).
+    // A partir da revisao Tech Lead #2 (fix #4), a verificacao deixou de ser
+    // uma segunda varredura paginada completa e passou a ser DIRECIONADA por
+    // item efetivamente escrito (readWakePriceTableByVariantId(), ver
+    // comentario mais abaixo) -- formula atual de requests por run: 1 leitura
+    // paginada inicial (diff, topo da funcao) + N leituras direcionadas (1
+    // GET por item escrito), nunca mais um segundo full-scan.
+    //
+    // FIX (revisao Tech Lead #3, item 2): UPDATE e ADD dentro do mesmo lote
+    // agora sao duas operacoes independentes, cada uma com seu proprio
+    // try/catch. Antes, as duas chamadas (updateWakePriceTableProducts +
+    // addWakePriceTableProducts) dividiam UM try/catch por lote -- se o
+    // UPDATE tivesse sucesso e o ADD falhasse (ou vice-versa), o catch unico
+    // marcava o LOTE INTEIRO como failed e os itens do UPDATE que realmente
+    // foram enviados com sucesso nunca entravam em writtenItems, perdendo o
+    // readback e a chance de virar 'applied'. Agora cada metade so afeta os
+    // proprios itens: sucesso de um lado nao e derrubado por falha do outro.
     const writtenItems: typeof toApplyTablePrice = []
     for (let i = 0; i < toApplyTablePrice.length; i += WAKE_BATCH_SIZE) {
       const batch = toApplyTablePrice.slice(i, i + WAKE_BATCH_SIZE)
-      const toUpdate: WakePriceTableProductItem[] = batch.filter((b) => b.existsInTable).map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor }))
-      const toAdd: WakePriceTableProductItem[] = batch.filter((b) => !b.existsInTable).map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor }))
+      const updateBatch = batch.filter((b) => b.existsInTable)
+      const addBatch = batch.filter((b) => !b.existsInTable)
 
-      try {
-        if (toUpdate.length > 0) await updateWakePriceTableProducts(priceTableId, toUpdate)
-        if (toAdd.length > 0) await addWakePriceTableProducts(priceTableId, toAdd)
-        writtenItems.push(...batch)
-      } catch (err) {
-        const message = err instanceof WakeClientError ? err.message : String(err)
-        for (const b of batch) {
-          changed++
-          failed++
-          await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', status: 'failed', errorMessage: message })
+      if (updateBatch.length > 0) {
+        try {
+          await updateWakePriceTableProducts(
+            priceTableId,
+            updateBatch.map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor })),
+          )
+          writtenItems.push(...updateBatch)
+        } catch (err) {
+          const message = err instanceof WakeClientError ? err.message : String(err)
+          for (const b of updateBatch) {
+            changed++
+            failed++
+            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', status: 'failed', errorMessage: message })
+          }
+        }
+      }
+
+      if (addBatch.length > 0) {
+        try {
+          await addWakePriceTableProducts(
+            priceTableId,
+            addBatch.map((b) => ({ sku: b.product.wakeSku, precoDe: b.precoDe, precoPor: b.precoPor })),
+          )
+          writtenItems.push(...addBatch)
+        } catch (err) {
+          const message = err instanceof WakeClientError ? err.message : String(err)
+          for (const b of addBatch) {
+            changed++
+            failed++
+            await logItem({ syncRunId, managedProductId: b.product.id, field: 'special_price', status: 'failed', errorMessage: message })
+          }
         }
       }
     }

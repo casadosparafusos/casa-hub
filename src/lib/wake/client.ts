@@ -565,7 +565,10 @@ export async function readWakePriceTableByVariantId(variantId: number, tableId: 
       params: { tipoIdentificador: 'ProdutoVarianteId', camposAdicionais: 'TabelaPreco' },
     })
   } catch (err) {
-    if (err instanceof WakePermanentError && /\b404\b/.test(err.message)) return null
+    // 404 e 422 ("produto nao encontrado") sao tratados como o mesmo caso de
+    // negocio aqui: mesmo endpoint (/produtos/{id}) que getWakeProductBySku
+    // ja trata assim acima -- consistencia de contrato, nao suposicao nova.
+    if (err instanceof WakePermanentError && /\b(404|422)\b/.test(err.message)) return null
     throw err
   }
 
