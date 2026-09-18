@@ -71,7 +71,14 @@ export default async function ConfiguracoesPage() {
   // as 4 settings obrigatorias, nao os outros gates (provider real, readiness,
   // rollout). A barra de progresso continua baseada só na confirmacao das
   // settings, sem novo fluxo de baixa de estoque inventado.
-  const stockMode = values.WAKE_STOCK_CONTROL_MODE
+  // Revisao Tech Lead PR #4, "one last UI canonicalization fix": values.*
+  // e o texto cru lido por getSetting(), nao a forma canonica que
+  // validateEnumSettingValue() calcularia -- 'ERP'/'ErP' passam no enum
+  // (case-insensitive) mas nao batem em stockMode === 'erp' sem normalizar
+  // aqui, o que mostraria "Configuração confirmada" mesmo com o backend
+  // bloqueando estoque real. Normaliza so pra essa comparacao de exibicao,
+  // sem tocar em regra de negocio nem no backend.
+  const stockMode = values.WAKE_STOCK_CONTROL_MODE?.trim().toLowerCase() ?? null
   const stockWriteBlocked = allConfirmed && stockMode === 'erp'
 
   return (
