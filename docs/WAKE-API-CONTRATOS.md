@@ -92,6 +92,12 @@ explicitamente como **NÃO CONFIRMADO**.
   throttle seguidas bloqueiam o token por 1 hora.** Por isso
   `src/lib/wake/client.ts` usa backoff conservador (poucas tentativas,
   circuito aberto ao se aproximar do limiar) em vez de retry agressivo.
+  **FASE D-PRE (18/09/2026)**: até então, uma falha de rede real (DNS,
+  conexão recusada, socket caindo no meio) chegava como `TypeError` do
+  `fetch()` -- um tipo diferente de `AbortError`/timeout/429/5xx -- e caía
+  direto no `throw` final sem nenhuma tentativa nova. Passou a entrar no
+  mesmo caminho de retry com backoff, respeitando `MAX_RETRIES=2`;
+  `WakePermanentError` (4xx exceto 429) continua nunca retentado.
 - **`GET /lojasFisicas`**: lista lojas físicas/pontos de retirada. Cada item
   traz `lojaId`, `nome`, `ativo` e, crucialmente, **`centroDistribuicaoId`**
   -- esse campo NÃO aparece na tela do admin (`AdicionarLoja?lojaId=N`), só

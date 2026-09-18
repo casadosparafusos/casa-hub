@@ -1,5 +1,20 @@
 # CHANGELOG — documentação
 
+## v13 — 18/09/2026
+
+FASE D-PRE (`fix/preprod-static-hardening`, sobre `main` já com `feat/write-guards-readback` mergeada via PR #3, `5d94b9b`): hardening estático pré-produção a partir de achados de auditoria independente do Tech Lead direto sobre o repositório público — FASE D.0 (rollout real) ficou BLOCKED por SSH/credenciais, então a revisão passou a ser estática. Escopo só código+testes+documentação, sem merge/deploy/migration em produção/escrita real em Wake/CISS. Ver detalhes em `STATUS.md` (seção "FASE D-PRE").
+
+Mudanças:
+- **Tabela 74 — releitura pós-escrita não cresce mais com o número de lotes**: `syncPrices()` (`src/lib/sync/engine.ts`) relia a tabela inteira DENTRO do loop de cada lote (P páginas * B lotes de GETs, risco real de estourar o rate limit da Wake); agora escreve todos os lotes primeiro e faz uma única releitura final — no máximo 2 leituras por run, nunca crescendo com B; teste dedicado prova com 110 entradas/3 lotes (6 leituras, não 12);
+- **Dry-run passou a mostrar o plano da Tabela 74**: a leitura (só `GET`) roda também em `dryRun:true` agora — antes o preview de segurança pulava a Tabela 74 inteira e nunca detectava divergência de `special_price`;
+- **Validação de faixa das settings comerciais no servidor**: `validateSettingValue()` (`src/lib/settings.ts`) passou a validar as 12 chaves numéricas conhecidas com faixas exatas antes de persistir — antes só a UI validava, `PUT /api/settings` aceitava qualquer string numérica fora de faixa; 46 testes novos (`src/lib/settings.test.ts`);
+- **`GET /api/settings` exige sessão**: antes respondia sem autenticação (não vazava segredo em texto puro, mas expunha config operacional sem controle de acesso); agora usa `requireSessionIdentity()`, 401 sem sessão válida; 10 testes novos (`src/app/api/settings/route.test.ts`);
+- **Retry de falha de rede real no cliente Wake**: `TypeError` do `fetch()` (DNS, conexão recusada, socket caindo no meio) agora entra no mesmo caminho de retry com backoff que timeout/429/5xx, respeitando `MAX_RETRIES=2` — antes caía direto no `throw` final sem nenhuma tentativa nova; `WakePermanentError` continua nunca retentado; 3 testes novos (`src/lib/wake/client.test.ts`);
+- **Lock só pode ser liberado pelo dono — suíte dedicada nova**: fix já existente (token único por aquisição, `releaseLock()` só limpa se o token bater) ganhou 11 testes novos (`src/lib/sync/lock.test.ts`), cobrindo o cenário central da corrida (release com token velho depois do lock passar a um novo dono vira no-op);
+- **2 comentários/docs de estoque desatualizados corrigidos**: docblock de `updateWakeStock()` e comentário de ACK em `syncStock()` ainda descreviam o mecanismo de leitura da FASE C.1 (listagem+cursor) em vez do endpoint dedicado da FASE C.2;
+- 514 testes no total (443 da FASE C.2 + 71 líquidos novos); `tsc --noEmit`, `vitest run` (24 arquivos) e `npm run build` limpos; scan de segredos/`.env`/`artifacts-private/`/dado-por-SKU limpo;
+- **não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS, os 16 PC não corrigidos, KG não remediado, promoção 10365 inalterada, FASE D real de rollout continua BLOCKED por SSH/credenciais**.
+
 ## v12 — 17/09/2026
 
 FASE C.2 (`feat/write-guards-readback`, mesma branch, ainda Draft PR #3): corrige o readback de estoque para usar o endpoint oficial dedicado da Wake em vez do endpoint de listagem/catálogo usado na FASE C.1. Achado de revisão adicional depois de fechado o BLOCKER da FASE C.1 — a semântica ACK≠VERIFIED já estava correta, só o endpoint HTTP era o errado. Branch não mergeada, sem deploy/migration em produção/escrita real em Wake/CISS/início da FASE D. Ver detalhes em `STATUS.md` e `ARCHITECTURE_TARGET.md` (seção "FASE C.2").

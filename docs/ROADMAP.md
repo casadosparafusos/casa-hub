@@ -21,14 +21,18 @@ Sem writes.
 
 Status: provider live e systemd confirmados (`audit/fase-0-runtime-readonly`, `464c429`/`8448372`). O restante (reconciliação Wake ao vivo) foi coberto pelas fases seguintes.
 
-## FASE 1 — Guards de produção — P0 — implementado + hardening final em `feat/write-guards-readback` (FASE C + FASE C.1 + FASE C.2, 17/09/2026), Draft PR #3 em revisão final antes do merge
+## FASE 1 — Guards de produção — P0 — implementado + hardening final em `feat/write-guards-readback` (FASE C + FASE C.1 + FASE C.2, 17/09/2026) mergeada via PR #3; hardening estático adicional em `fix/preprod-static-hardening` (FASE D-PRE, 18/09/2026), Draft PR aberto
 
 - **impedir mock → Wake — feito**: `runSyncLocked()` (`src/lib/sync/engine.ts`) recusa a run inteira (`MOCK_PROVIDER_WRITE_BLOCKED`) antes de criar `sync_runs` quando `getActivePriceProvider().name === 'mock'` fora de dry-run, pra qualquer `kind`. Ver `ARCHITECTURE_TARGET.md`, seção "FASE C".
-- settings com Zod por chave — não fez parte desta rodada;
-- GET settings autenticado — não fez parte desta rodada;
-- lock owner-aware — pré-existente, não alterado nesta rodada;
+- **Tabela 74, releitura pós-escrita não escala com o número de lotes — feito na FASE D-PRE**: releitura movida pra fora do loop de escrita, no máximo 2 leituras por run (antes crescia como `P páginas * B lotes`, risco real de estourar o rate limit da Wake);
+- **dry-run mostra o plano da Tabela 74 — feito na FASE D-PRE**: leitura (`GET`) passou a rodar também em `dryRun:true`, antes o preview pulava a Tabela 74 inteira;
+- **settings com validação de faixa por chave — feito na FASE D-PRE**: `validateSettingValue()` (`src/lib/settings.ts`) agora valida faixa exata das 12 settings numéricas conhecidas, tanto no `PUT` quanto na leitura usada pelo sync real;
+- **GET settings autenticado — feito na FASE D-PRE**: `GET /api/settings` passou a exigir `requireSessionIdentity()`, antes respondia sem autenticação;
+- **lock owner-aware — pré-existente, ganhou suíte de testes dedicada na FASE D-PRE** (`src/lib/sync/lock.test.ts`, 11 testes; o fix em si já era de fase anterior);
 - tick serial — pré-existente, não alterado nesta rodada;
 - health/ready — não fez parte desta rodada.
+
+**FASE D-PRE (hardening estático pré-produção, 18/09/2026, `fix/preprod-static-hardening`)** — **não confundir com a FASE D real de rollout** (validação da promoção 10365/atacarejo Wake, referenciada na FASE 4 abaixo, que continua BLOCKED por SSH/credenciais). FASE D-PRE é uma fase código-only disparada por auditoria estática independente do Tech Lead direto sobre o repositório público, cobrindo os 5 itens desta lista marcados "feito na FASE D-PRE" acima, mais retry de falha de rede real (`TypeError`) no cliente Wake, suíte dedicada nova pro lock owner-aware e correção de 2 comentários desatualizados sobre o mecanismo de leitura de estoque. Detalhes em `ARCHITECTURE_TARGET.md` (seção "FASE D-PRE") e `STATUS.md`. 514 testes no total. **Não mergeado, não deployado, nenhuma escrita real em Wake/CISS; não desbloqueia a FASE D real.**
 
 **Também na FASE C (fora do escopo original desta linha do roadmap, mas mesma branch)**: modelo de estados `DETECTED → SENT → READ BACK → VERIFIED` com distinção explícita `MISMATCH` (Wake aceitou a escrita, valor releu diferente) vs `FAILED` (erro de fato); read-after-write da Tabela de Preço 74 (lacuna real, antes inexistente); teste de idempotência ponta a ponta; cobertura de retry/backoff pra `ciss/client.ts` e `wake/client.ts` (antes zero). Detalhes completos em `ARCHITECTURE_TARGET.md` e `STATUS.md`. 425 testes no total, typecheck limpo. **Não mergeado, não deployado, nenhuma escrita real em Wake/CISS.**
 

@@ -255,6 +255,40 @@ O endpoint dedicado continua sendo 1 GET por item efetivamente aceito no ACK do 
 
 Testes: **443 no total** (441 da FASE C.1 + 2 líquidos: suíte de `readWakeStockByVariantId` em `client.test.ts` cresceu de 7 pra 9 cenários, restante do arquivo idêntico). `tsc --noEmit`, `vitest run` (21 arquivos) e `npm run build` limpos.
 
+## FASE D-PRE — Hardening estático pré-produção, achados de auditoria independente do Tech Lead (`fix/preprod-static-hardening`, 18/09/2026)
+
+FASE D.0 (rollout real: CD 25, tabela 74, promoção 10365) ficou BLOCKED por Auto Mode impedir SSH/exec remoto pro host de produção (`10.0.247.6`) e por ausência de credenciais reais CISS/Wake no ambiente local. O Tech Lead passou a auditar diretamente o repositório público e encontrou blockers estáticos anteriores ao rollout. Branch sobre `main` (`5d94b9b`, já com FASE C/C.1/C.2 mergeadas via PR #3). Escopo só código+testes+documentação — sem produção, SSH, deploy, migration em produção, escrita real Wake/CISS, correção dos 16 PC, remediação de KG ou alteração da promoção 10365.
+
+### Tabela 74 — releitura pós-escrita não cresce mais com o número de lotes
+
+`syncPrices()` (`src/lib/sync/engine.ts`) relia a Tabela de Preço 74 inteira (paginada) DENTRO do loop de cada lote de escrita — com P páginas na tabela e B lotes de escrita, o total de GETs pós-escrita crescia como `P*B`, além da leitura inicial do diff. Isso é o suficiente pra estourar o rate limit da Wake (120 req/min por grupo de endpoint; 5 throttles seguidos travam o token por 1h — ver `WAKE-API-CONTRATOS.md`) quando muitos produtos mudam de uma vez. Corrigido: todos os lotes agora são escritos primeiro, sem reler entre eles, e só depois roda uma única releitura paginada cobrindo todos os itens escritos com sucesso — total de leituras por run fica em no máximo 2 (1 diff inicial + 1 verificação final), independente do número de lotes. Teste dedicado em `engine.test.ts` reproduz o cenário com 110 entradas na tabela (3 páginas) e 110 alterações em 3 lotes de escrita, provando exatamente 6 leituras (2 * 3 páginas), nunca as 12 que o código antigo geraria (`3 páginas * (1 diff + 3 lotes)`).
+
+### Dry-run passou a mostrar o plano da Tabela 74
+
+Antes, a leitura de `tableEntries` (o diff da Tabela 74) só rodava fora de dry-run (`!dryRun && priceTableId !== null`), então `dryRun:true` pulava a Tabela 74 inteira e o preview de segurança nunca detectava nenhuma divergência de `special_price` antes de uma escrita real. Como a leitura é estritamente `GET` (nunca `POST`/`PUT`), ela passou a rodar independente de `dryRun`; em modo dry-run, cada divergência encontrada é registrada com status `'planned'` (sem chamar nenhum dos escritores da Tabela 74).
+
+### Validação de faixa das settings comerciais no servidor
+
+`validateSettingValue()` (`src/lib/settings.ts`) ganhou faixas exatas por chave para as 12 settings numéricas conhecidas (`UNIT_PRICE_MARKUP_PERCENT`, `WHOLESALE_DISCOUNT_PERCENT`, `STOCK_PERCENT`, `WHOLESALE_MIN_QTY`, `RECONCILIATION_HOUR_LOCAL`, `STOCK_SYNC_INTERVAL_MINUTES`, `PRICE_SYNC_INTERVAL_HOURS`, `CISS_STOCK_ENTERPRISE`, `CISS_STOCK_LOCATION`, `WAKE_CD_ID`, `WAKE_PRICE_TABLE_ID`, `WAKE_PROMOTION_ID`), chamada tanto no `PUT /api/settings` (rejeita com 400 antes de persistir) quanto na leitura usada pelo motor de sync real (um valor já persistido fora de faixa — ex.: editado direto no banco — bloqueia o sync do mesmo jeito que bloquearia se estivesse ausente, nunca aplica um valor fora de faixa). Ausente continua caindo no default documentado. 46 testes novos (`src/lib/settings.test.ts`).
+
+### `GET /api/settings` exige sessão
+
+Rota estava respondendo sem autenticação — não vazava valor de segredo em texto puro (segredos são write-only/criptografados, `secrets.CHAVE` só devolve `true`/`false`), mas expunha config operacional (faixas, chaves obrigatórias, quais segredos estão setados) sem controle de acesso algum. Passou a usar `requireSessionIdentity()`, o mesmo guard das demais rotas autenticadas — 401 sem sessão válida. 10 testes novos (`src/app/api/settings/route.test.ts`, primeira suíte de rota de API do projeto, chamando `GET`/`PUT` exportados direto).
+
+### Retry de falha de rede real no cliente Wake
+
+`wakeRequest()` (`src/lib/wake/client.ts`) já retentava timeout/`AbortError` e 429/5xx com backoff. Uma falha de rede de verdade (DNS, conexão recusada, socket caindo no meio) chega como `TypeError` do `fetch()` — um tipo diferente, que antes caía direto no `throw` final sem nenhuma tentativa nova. Passou a entrar no mesmo caminho de retry, respeitando `MAX_RETRIES=2`; `WakePermanentError` (4xx exceto 429) continua nunca retentado. 3 testes novos em `client.test.ts`.
+
+### Lock só pode ser liberado pelo dono — suíte dedicada nova
+
+O fix (padrão owner-token: `acquireLock()` devolve token único por aquisição, `releaseLock()` só limpa se o token bater com o dono atual) já existia de uma fase anterior, mas sem nenhum teste unitário próprio. `src/lib/sync/lock.test.ts` (11 testes novos) cobre acquire/release básico, roubo por TTL expirado, roubo por PID de dono morto, `withLocks()` e `recoverWorkerOrphans()` — e, como cenário central, a corrida específica que o fix resolve: dono A adquire, lock passa a dono B via TTL expirado/PID morto, e o `releaseLock()` tardio de A (com o token antigo) vira no-op, deixando B intocado como dono.
+
+### Comentários de estoque desatualizados corrigidos
+
+Docblock de `updateWakeStock()` e comentário de verificação de ACK em `syncStock()` (`src/lib/sync/engine.ts`) ainda descreviam o mecanismo de leitura da FASE C.1 (`GET /produtos` de listagem + cursor) como se fosse o atual — desde a FASE C.2 o mecanismo real é o endpoint dedicado `GET /produtos/{identificador}/estoque`. Reescritos para descrever o mecanismo vigente; achado puramente estático, sem impacto em runtime.
+
+Testes: **514 no total, 24 arquivos** (443 da FASE C.2 + 71 líquidos novos). `tsc --noEmit`, `vitest run` e `npm run build` limpos. Não mergeado, não deployado, nenhuma migration aplicada em produção, nenhuma escrita real em Wake/CISS. FASE D real de rollout continua BLOCKED por SSH/credenciais.
+
 ## Realtime
 
 POST manual:
