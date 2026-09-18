@@ -128,6 +128,44 @@ describe('wakeRequest -- retry/backoff/circuito (FASE C §11)', () => {
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 
+  // FASE D-PRE §6 (achado independente do Tech Lead): fetch() rejeita com
+  // TypeError (nao AbortError) numa falha de rede REAL -- DNS, conexao
+  // recusada, socket caindo no meio. Antes disso, esse catch reconhecia so
+  // WakeClientError (repropaga) e AbortError (retry) -- um TypeError
+  // generico caia no `throw err` final, subindo sem NENHUMA tentativa nova,
+  // mesmo sendo o tipo de falha mais obvio pra retentar.
+  it('falha de rede (TypeError) seguida de sucesso: retentativa funciona', async () => {
+    const { getWakePriceTables } = await import('./client')
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(fakeResponse(200, JSON.stringify([])))
+
+    const promise = getWakePriceTables()
+    await vi.runAllTimersAsync()
+    const result = await promise
+
+    expect(result).toEqual([])
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('falha de rede (TypeError) persistente: esgota MAX_RETRIES=2 tentativas e lanca WakeTransientError', async () => {
+    const { getWakePriceTables, WakeTransientError } = await import('./client')
+    vi.mocked(fetch).mockRejectedValue(new TypeError('fetch failed'))
+
+    const promise = getWakePriceTables()
+    const assertion = expect(promise).rejects.toThrow(WakeTransientError)
+    await vi.runAllTimersAsync()
+    await assertion
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('erro permanente (4xx) nunca retenta, mesmo quando pareceria uma falha transiente', async () => {
+    const { getWakePriceTables, WakePermanentError } = await import('./client')
+    vi.mocked(fetch).mockResolvedValue(fakeResponse(401, 'nao autorizado'))
+
+    await expect(getWakePriceTables()).rejects.toThrow(WakePermanentError)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
   it('circuito abre apos 5 throttles consecutivos: recusa sem chamar fetch, mesmo em rota nova', async () => {
     const { getWakePriceTables, getWakePhysicalStores, WakeTransientError, WakePermanentError } = await import('./client')
     vi.mocked(fetch).mockResolvedValue(fakeResponse(429, 'throttle'))

@@ -95,6 +95,20 @@ async function wakeRequest<T>(method: 'GET' | 'PUT' | 'POST', path: string, opti
         if (attempt >= MAX_RETRIES) throw new WakeTransientError(`Wake timeout em ${path}`)
         continue
       }
+      // FASE D-PRE §6 (achado independente do Tech Lead): antes, uma falha de
+      // rede REAL (DNS, conexao recusada, socket caiu no meio -- fetch()
+      // rejeita com TypeError nesses casos, nao com AbortError) subia direto
+      // pro chamador sem NENHUMA tentativa nova, mesmo sendo exatamente o
+      // tipo de falha transiente que o retry de 429/5xx/timeout ja existe pra
+      // absorver. Agora TypeError tenta de novo com backoff pequeno,
+      // respeitando o mesmo MAX_RETRIES -- WakePermanentError continua
+      // nunca sendo retentado (ja sobe direto no `if (err instanceof
+      // WakeClientError) throw err` acima, antes de chegar aqui).
+      if (err instanceof TypeError) {
+        if (attempt >= MAX_RETRIES) throw new WakeTransientError(`Falha de rede em ${path}: ${err.message}`)
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
+        continue
+      }
       throw err
     }
   }
@@ -194,18 +208,17 @@ function normalizeStockUpdateResponse(raw: unknown): WakeStockUpdateResponse {
  * (`resultado` + `detalhes` dentro de produtosAtualizados /
  * produtosNaoAtualizados).
  *
- * FASE C.1 (17/09/2026): esse ack sozinho NAO e mais suficiente pra marcar
- * 'applied' -- e sinal de que o Wake ACEITOU a chamada, nao de que o estado
- * remoto de fato ficou no valor esperado (regra canonica: "writer 2xx/ACK !=
- * estado remoto verificado"). syncStock() agora usa o ack so como triagem
- * (rejeitado no ack -> falha direto, sem gastar uma leitura) e, pro que foi
- * aceito, faz uma releitura REAL via readWakeStockByVariantId() antes de
- * confirmar 'applied'. Ate 17/09/2026 o codigo achava que `GET /produtos/{sku}`
- * (unico endpoint testado na epoca) era a unica forma de reler estoque, e
- * como ele sempre devolve `estoque: []`, a reconferencia por leitura parecia
- * impossivel -- daí o ack-only. readWakeStockByVariantId() usa outro
- * endpoint (`GET /produtos`, listagem/catalogo) que de fato devolve
- * `estoque[]` quando `camposAdicionais=Estoque` e pedido (ver comentario la).
+ * FASE C.2: esse ack sozinho NAO e suficiente pra marcar 'applied' -- e sinal
+ * de que o Wake ACEITOU a chamada, nao de que o estado remoto de fato ficou
+ * no valor esperado (regra canonica: "writer 2xx/ACK != estado remoto
+ * verificado"). syncStock() usa o ack so como triagem (rejeitado no ack ->
+ * falha direto, sem gastar uma leitura) e, pro que foi aceito, faz uma
+ * releitura REAL via readWakeStockByVariantId() antes de confirmar
+ * 'applied'. readWakeStockByVariantId() usa o endpoint dedicado
+ * `GET /produtos/{identificador}/estoque` (ver comentario dele mais abaixo),
+ * que devolve o estoque por centro de distribuicao de verdade -- diferente
+ * de `GET /produtos/{sku}`, que sempre devolve `estoque: []` e por isso nunca
+ * serviu pra reconferencia.
  */
 export async function updateWakeStock(items: WakeStockUpdateItem[]): Promise<WakeStockUpdateResponse> {
   if (items.length > 50) throw new Error('updateWakeStock: lote maior que 50 -- particione antes de chamar')
