@@ -141,6 +141,15 @@ explicitamente como **NÃO CONFIRMADO**.
   persistir; qualquer outro valor recebe `400` no `PUT /api/settings` e não
   é gravado). Ver `SETTING_ENUM_RANGES`/`validateEnumSettingValue` em
   `src/lib/settings.ts`.
+  Revisão Tech Lead PR #4, revisão final #2 (fix #1): `erp` é um valor
+  válido pra registro/gate, mas nenhuma escrita real de estoque acontece
+  com ele -- esta integração não implementa baixa por evento de pedido (ver
+  parágrafo acima). Pra não deixar a lacuna passar despercebida em runtime,
+  `runSyncLocked()` (`src/lib/sync/engine.ts`) agora recusa a run inteira
+  com `WAKE_STOCK_CONTROL_MODE_UNSUPPORTED_FOR_REAL_STOCK_SYNC` antes de
+  criar o `sync_run`, sempre que `kind` inclui estoque (`'stock'`/`'both'`)
+  E `dryRun===false` E o modo gravado é `erp`. Não afeta `dryRun:true` nem
+  `kind:'price'`. Ver `ARCHITECTURE_TARGET.md`, seção "FASE D-PRE".
 
 ## Bloqueio ativo no token CISS dedicado (04/09/2026)
 
