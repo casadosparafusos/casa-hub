@@ -55,7 +55,14 @@ function isProcessAlive(pid: number): boolean {
 
 export class LockUnavailableError extends Error {}
 
-export async function acquireLock(resource: string, lockedBy: string, ttlMs = DEFAULT_TTL_MS): Promise<void> {
+// FASE D-PRE §7: acquireLock devolve o token que gravou (tag = lockedBy+pid,
+// unico por acquisicao) e releaseLock exige esse token pra limpar. Sem isso,
+// um TTL expirado com o dono original ainda vivo (rodando mais que o
+// backstop de 3h) deixava outro processo adquirir o lock (result.changes>0
+// no UPDATE condicional por expiresAt), e depois o dono original terminava
+// e chamava releaseLock(resource) sem condicao nenhuma -- limpando o lock do
+// novo dono legitimo enquanto ele ainda estava rodando.
+export async function acquireLock(resource: string, lockedBy: string, ttlMs = DEFAULT_TTL_MS): Promise<string> {
   const now = new Date()
   const expiresAt = new Date(now.getTime() + ttlMs).toISOString()
   const nowIso = now.toISOString()
@@ -74,7 +81,7 @@ export async function acquireLock(resource: string, lockedBy: string, ttlMs = DE
       ),
     )
     .run()
-  if (result.changes > 0) return
+  if (result.changes > 0) return tag
 
   // Ocupado -- mas o dono ainda esta vivo?
   const current = await db.select().from(schema.jobLocks).where(eq(schema.jobLocks.resource, resource)).get()
@@ -88,18 +95,19 @@ export async function acquireLock(resource: string, lockedBy: string, ttlMs = DE
       .run()
     if (stolen.changes > 0) {
       console.warn(`[lock] '${resource}' estava preso por processo morto (${current.lockedBy}) -- liberado`)
-      return
+      return tag
     }
   }
 
   throw new LockUnavailableError(`Recurso '${resource}' ja esta em uso por outra sincronizacao em andamento.`)
 }
 
-export async function releaseLock(resource: string): Promise<void> {
+/** So libera se `token` (devolvido por acquireLock) ainda for o dono atual do lock. */
+export async function releaseLock(resource: string, token: string): Promise<void> {
   await db
     .update(schema.jobLocks)
     .set({ lockedAt: null, lockedBy: null, expiresAt: null })
-    .where(eq(schema.jobLocks.resource, resource))
+    .where(and(eq(schema.jobLocks.resource, resource), eq(schema.jobLocks.lockedBy, token)))
     .run()
 }
 
@@ -110,15 +118,15 @@ export async function releaseLock(resource: string): Promise<void> {
  */
 export async function withLocks<T>(resources: string[], lockedBy: string, fn: () => Promise<T>): Promise<T> {
   const ordered = [...new Set(resources)].sort()
-  const held: string[] = []
+  const held: Array<{ resource: string; token: string }> = []
   try {
     for (const r of ordered) {
-      await acquireLock(r, lockedBy)
-      held.push(r)
+      const token = await acquireLock(r, lockedBy)
+      held.push({ resource: r, token })
     }
     return await fn()
   } finally {
-    for (const r of held.reverse()) await releaseLock(r)
+    for (const { resource, token } of held.reverse()) await releaseLock(resource, token)
   }
 }
 
